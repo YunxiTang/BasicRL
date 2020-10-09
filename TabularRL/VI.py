@@ -9,7 +9,7 @@ seed = 1
 env = gym.make('FrozenLake8x8-v0')
 env.reset()
 
-# Managing configurations of your experiments is important for your research.
+# Managing configurations of experiments
 default_vi_config = dict(
     max_iteration=10000,
     evaluate_interval=100,  # don't need to update policy each iteration
@@ -44,6 +44,7 @@ def value_iteration(train_config=None):
                   "mean episode reward is {}.".format(
                 i, trainer.evaluate()
             ))
+            trainer.update
             if should_stop:
                 print("We found policy is not changed anymore at "
                       "itertaion {}. Current mean episode reward "

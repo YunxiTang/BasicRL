@@ -140,7 +140,6 @@ class ValueIterationTrainer(PolicyIterationTrainer):
     def train(self):
         """Conduct one iteration of learning."""
         self.update_value_function()
-        self.update_policy()
 
     def update_value_function(self):
         old_table = self.table.copy()
