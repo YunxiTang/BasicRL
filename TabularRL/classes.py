@@ -127,7 +127,7 @@ class PolicyIterationTrainer(TabularRLTrainerAbstract):
         self.policy = lambda obs: policy_table[obs]
 
 
-class ValueIterationTrainer(PolicyItertaionTrainer):
+class ValueIterationTrainer(PolicyIterationTrainer):
     """Note that we inherate Policy Iteration Trainer, to resue the
     code of update_policy(). It's same since it get optimal policy from
     current state-value table (self.table).
@@ -135,38 +135,27 @@ class ValueIterationTrainer(PolicyItertaionTrainer):
 
     def __init__(self, gamma=1.0, env_name='FrozenLake8x8-v0'):
         super(ValueIterationTrainer, self).__init__(gamma, None, env_name)
+        self.table = np.zeros((self.obs_dim,))
 
     def train(self):
         """Conduct one iteration of learning."""
-        # [TODO] value function may be need to be reset to zeros.
-        # if you think it should, than do it. If not, then move on.
-        pass
-
-        # In value iteration, we do not explicit require a
-        # policy instance to run. We update value function
-        # directly based on the transitions. Therefore, we
-        # don't need to run self.update_policy() in each step.
         self.update_value_function()
+        self.update_policy()
 
     def update_value_function(self):
         old_table = self.table.copy()
 
         for state in range(self.obs_dim):
-            state_value = 0
-
-            # [TODO] what should be de right state value?
-            # hint: try to compute the state_action_values first
-            pass
-
+            state_value = 0.0
+            act = self.policy(state)
+            transition_list = self._get_transitions(state, act)
+            for transition in transition_list:
+                prob = transition['prob']
+                next_state = transition['next_state']
+                reward = transition['reward']
+                done = transition['done']
+                state_value = state_value + prob * (reward + self.gamma * self.table[next_state])
             self.table[state] = state_value
-
-        # Till now the one step value update is finished.
-        # You can see that we do not use a inner loop to update
-        # the value function like what we did in policy iteration.
-        # This is because to compute the state value, which is
-        # a expectation among all possible action given by a
-        # specified policy, we **pretend** already own the optimal
-        # policy (the max operation).
 
     def evaluate(self):
         """Since in value itertaion we do not maintain a policy function,
