@@ -28,6 +28,7 @@ def value_iteration(train_config=None):
         obs: 0 for obs in range(trainer.obs_dim)
     }
 
+    should_stop = False
     for i in range(config['max_iteration']):
         # train the agent
         trainer.train()
@@ -36,7 +37,11 @@ def value_iteration(train_config=None):
         }
         should_stop = op.eq(old_policy_result, new_policy_result)
 
-        old_policy_result = new_policy_result
+        if should_stop:
+            print("We found policy is not changed anymore at "
+                  "itertaion {}. Current mean episode reward "
+                  "is {}. Stop training.".format(i, trainer.evaluate()))
+            break
 
         # evaluate the result
         if i % config['evaluate_interval'] == 0:
@@ -44,17 +49,11 @@ def value_iteration(train_config=None):
                   "mean episode reward is {}.".format(
                 i, trainer.evaluate()
             ))
-            trainer.update
-            if should_stop:
-                print("We found policy is not changed anymore at "
-                      "itertaion {}. Current mean episode reward "
-                      "is {}. Stop training.".format(i, trainer.evaluate()))
-                break
-            if i > 3000:
-                print("You sure your codes is OK? It shouldn't take so many "
-                      "({}) iterations to train a policy iteration "
-                      "agent.".format(
-                    i))
+            old_policy_result = new_policy_result
+        if i > 3000:
+            print("You sure your codes is OK? It shouldn't take so many "
+                  "({}) iterations to train a policy iteration "
+                  "agent.".format(i))
 
     assert trainer.evaluate() > 0.8, \
         "We expect to get the mean episode reward greater than 0.8. " \
