@@ -6,9 +6,17 @@ class LinearRegressor():
         self.weight = w
         self.bias = b
 
+    @jax.jit
+    def update_param(self, grads):
+        return jax.tree_util.tree_map(lambda x, y: x - 1e-4 * y,
+                                            self, 
+                                            grads)
+
+    @jax.jit
     def predict(self, x):
         return self.weight * x + self.bias
 
+    @jax.jit
     def rms(self, xs: jnp.ndarray, ys: jnp.ndarray):
         return jnp.sqrt(jnp.sum(jnp.square(self.predict(xs) - ys)))
 
@@ -38,7 +46,6 @@ if __name__ == '__main__':
     grad_fn = jax.grad(loss_fn)
     for i in range(1001):
         grads = grad_fn(regressor, xs, ys)
-        regressor = jax.tree_util.tree_map(lambda x, y: x - 1e-4 * y,
-                                            regressor, grads)
+        regressor = regressor.update_param(grads)
         print(loss_fn(regressor, xs, ys))
     print(regressor.weight, regressor.bias)
