@@ -1,56 +1,83 @@
+import equinox as eqx
 import jax
-from flax import linen as nn
-from jax import numpy as jnp
-from jax import jit, vmap, grad
-import random
-import numpy as np
-from typing import Sequence
+import jax.numpy as jnp
+import jax.tree_util as jtu
 
-# data generator
-def data_synthetic():
-    return 0
+class myrelu(eqx.Module):
+    def __init__(self):
+        pass
+    def __call__(self, x):
+        return jax.numpy.maximum(x, 0)
+
+class normal_dist(eqx.Module):
+    mean: jnp.array
+    std: jnp.array
+
+    def __init__(self, shape, key):
+        key1, key2 = jax.random.split(key, 2)
+        self.mean = jax.random.normal(key1, shape)
+        self.std = jax.random.normal(key2, shape)
+
+    def __call__(self, x):
+        return jax.scipy.stats.multivariate_normal.logpdf(x, mean=self.mean, cov=self.std)
 
 
-# define a data iterator
-def data_iter(batch_size, features, labels):
-    num_examples = len(labels)
-    indices = list(range(num_examples))
-    random.shuffle(indices)
-    for i in range(0, num_examples, batch_size):
-        batch_indices = indices[i: min(i + batch_size, num_examples)]
-        yield features[batch_indices], labels[batch_indices]
+class MyModule(eqx.Module):
+    layers: list
 
-# define a model
-class simpleMLP(nn.Module):
-    
-    def setup(self):
-        self.layers = [nn.Dense(5), nn.Dense(10), nn.Dense(3)]
+    def __init__(self, key):
+        key1, key2, key3 = jax.random.split(key, 3)
+        self.layers = [eqx.nn.Linear(1, 8, key=key1),
+                       myrelu(),
+                       eqx.nn.Linear(8, 8, key=key2),
+                       myrelu(),
+                       eqx.nn.Linear(8, 8, key=key2),
+                       myrelu(),
+                       eqx.nn.Linear(8, 1, key=key3)]
 
-    def __call__(self, inputs):
-        x = inputs
-        for i, lyr in enumerate(self.layers):
-            x = lyr(x)
-            if i != len(self.layers)-1:
-                x = nn.relu(x)
+    @jax.jit
+    def __call__(self, x):
+        for layer in self.layers:
+            x = layer(x)
         return x
 
-# define loss
-def loss(y_hat, y):
-    l = jnp.mean((y_hat-y)**2)
-    return l
+    @jax.value_and_grad
+    def get_value_and_grad(self, x, y):
+        pred_y = jax.vmap(self)(x)
+        return jax.numpy.mean((y - pred_y) ** 2)
 
-def sgd(param, lr):
-    return 0
+    def update_with_loss(self, x, y, lr):
+        loss, grads = ( self.get_value_and_grad(x, y) )
+        learning_rate = lr
+        res = jtu.tree_map(lambda m, g: m - learning_rate * g, self, grads)
+        return res, loss
 
-def train(init_param, net, train_iter, loss, updater):
-    return 0
+x_key, y_key, model_key = jax.random.split(jax.random.PRNGKey(0), 3)
+x = 2. * jax.random.normal(x_key, (100, 1))
+y = 2 * x ** 2 + 1.5 + 0.1 * jax.random.normal(y_key, (100, 1))
+model = MyModule(model_key)
+for i in range(500):
+    model, l = model.update_with_loss(x, y, 0.001)
+    print('epoch {} || loss {}'.format(i, l))
 
-if __name__ == '__main__':
-    model = simpleMLP()
-    key1, key2 = jax.random.split(jax.random.PRNGKey(0), 2)
-    dummy_x = jax.random.normal(key1, (4, 4))
-    param = model.init(key2, dummy_x)
-    print(param)
-    y = model.apply(param, dummy_x)
-    print(y)
-   
+
+# x0 = jax.random.normal(x_key, (1,))
+# fx = jax.jacfwd(model, argnums=(0,))(x0)
+# print(fx)
+# print(model)
+for i in range(5):
+    print(jtu.tree_leaves(model.layers[i]))
+    print("=======================")
+
+import matplotlib.pyplot as plt
+y_hat = jax.vmap(model)(x)
+plt.figure(1)
+plt.scatter(x[:,0], y[:,0])
+plt.scatter(x[:,0], y_hat[:,0])
+plt.show()
+
+# eqx.tree_serialise_leaves("model_mlp.eqx", model)
+
+# model_new = MyModule(model_key, 15.)
+# model_loaded = eqx.tree_deserialise_leaves("model_mlp.eqx", model_new)
+# print( model_loaded == model )
