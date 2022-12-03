@@ -47,7 +47,7 @@ def low_api_run():
             l = loss(y_hat, label)
             l.backward()
             with torch.no_grad():
-                w -= lr * w.grad
+                w -= lr * w.grad # inplace operation!
                 b -= lr * b.grad
                 w.grad.zero_()
                 b.grad.zero_()
