@@ -10,8 +10,6 @@ from jax_utils import FlattenAndCast, NumpyLoader
 import numpy as np
 import torchvision
 
-jax.default_backend()
-
 def data_loader_fashion_mnist(batch_size, resize=None):
     mnist_train = torchvision.datasets.FashionMNIST(root='..\data', train=True, 
                                                     transform=FlattenAndCast(), download=True)

@@ -56,10 +56,10 @@ class myMLP(nn.Module):
         self.lr = lr
 
         self.layers = nn.Sequential(nn.Linear(feature_dim, num_hiddens), 
-                       nn.ReLU(), 
-                       nn.Linear(num_hiddens, num_hiddens), 
-                       nn.ReLU(),
-                       nn.Linear(num_hiddens, label_dim))
+                                    nn.ReLU(), 
+                                    nn.Linear(num_hiddens, num_hiddens), 
+                                    nn.ReLU(),
+                                    nn.Linear(num_hiddens, label_dim))
 
     def forward(self, x):
         for layer in self.layers:
