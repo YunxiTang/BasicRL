@@ -98,6 +98,8 @@ def low_api_run():
     return ptu.to_numpy(l)
 
 if __name__ == '__main__':
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f'using device: {device}')
     low_api_run()
 
 
