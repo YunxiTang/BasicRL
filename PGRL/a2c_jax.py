@@ -9,6 +9,8 @@ from jax import random
 from collections import OrderedDict
 import optax
 
+import matplotlib.pyplot as plt
+
 # RL environment setup.
 env = gym.make("InvertedPendulum-v4")
 env.reset(seed=0)
@@ -42,14 +44,14 @@ class Policy(eqx.Module):
         keys = jax.random.split(key, 5)
         # Embedding layers.
         self.trunk_layers = [
-            eqx.nn.Linear(state_dim, 128, key=keys[0]),
-            eqx.nn.Linear(128, 128, key=keys[1]),
+            eqx.nn.Linear(state_dim, 68, key=keys[0]),
+            eqx.nn.Linear(68, 68, key=keys[1]),
         ]
         # Actor's layers.
-        self.action_mean_head = eqx.nn.Linear(128, action_dim, key=keys[2])
-        self.action_std_head = eqx.nn.Linear(128, action_dim, key=keys[3])
+        self.action_mean_head = eqx.nn.Linear(68, action_dim, key=keys[2])
+        self.action_std_head = eqx.nn.Linear(68, action_dim, key=keys[3])
         # Critic's layers.
-        self.value_head = eqx.nn.Linear(128, 1, key=keys[4])
+        self.value_head = eqx.nn.Linear(68, 1, key=keys[4])
 
     @jax.jit
     def __call__(self, x):
@@ -70,7 +72,7 @@ def compute_returns(rewards, discount_factor):
     returns.reverse()
     return np.array(returns)
 
-
+@jax.jit
 def train_loss_for_epsiode(policy: Policy, states, actions, returns, num_steps):
     action_distributions, values = jax.vmap(policy)(states)
     action_log_probs = action_distributions.log_prob(actions)
@@ -81,7 +83,6 @@ def train_loss_for_epsiode(policy: Policy, states, actions, returns, num_steps):
     return actor_loss + critic_loss
 
 
-@jax.jit
 def train_step_for_episode(opt_state, policy, states, actions, returns, num_steps):
     grads = jax.grad(train_loss_for_epsiode)(policy, states, actions, returns, num_steps)
     updates, opt_state = optimizer.update(grads, opt_state)
@@ -103,6 +104,7 @@ if __name__ == '__main__':
     opt_state = optimizer.init(policy)
 
     episodic_rewards = []
+    smooth_episodic_rewards = []
     episodic_reward_ema = None  # Exponential moving average of episodic rewards.
     return_ema = None           # Exponential moving average of returns (i.e., critic targets).
     return_emv = None           # Exponential moving variance of returns (i.e., critic targets).
@@ -141,7 +143,7 @@ if __name__ == '__main__':
             episodic_reward_ema = 0.95 * episodic_reward_ema + (1 - 0.95) * episodic_reward
             return_ema = ema_factor * return_ema + (1 - ema_factor) * returns.mean()
             return_emv = ema_factor * (return_emv + (1 - ema_factor) * np.mean((returns - return_ema)**2))
-
+        smooth_episodic_rewards.append(episodic_reward_ema)
         # Normalization
         standardized_returns = (returns - return_ema) / (np.sqrt(return_emv) + 1e-6)
 
@@ -163,3 +165,10 @@ if __name__ == '__main__':
             print(
                 f"Episode {i_episode}\tLast reward: {episodic_reward:.2f}\tMoving average reward: {episodic_reward_ema:.2f}"
             )
+        if episodic_reward_ema > 580:
+            break
+
+    plt.figure(1)
+    plt.plot(episodic_rewards)
+    plt.plot(smooth_episodic_rewards)
+    plt.show()

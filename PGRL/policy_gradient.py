@@ -7,6 +7,8 @@ from collections import OrderedDict
 import optax
 import equinox as eqx
 
+import matplotlib.pyplot as plt
+
 def to_numpy(x):
     return np.array(x)
 
@@ -112,7 +114,7 @@ class exp_arg(object):
 if __name__ == '__main__':
     render = bool(1)
     render_interval = 50
-
+    replaybuffer = ReplayBuffer()
     # RL environment setup.
     env = gym.make("InvertedPendulum-v4")
     env.reset(seed=0)
@@ -131,6 +133,7 @@ if __name__ == '__main__':
     opt_state = optimizer.init(policy)
 
     episodic_rewards = []
+    smooth_episodic_rewards = []
     episodic_reward_ema = 0     # Exponential moving average of episodic rewards.
     return_ema = None           # Exponential moving average of returns (i.e., critic targets).
     return_emv = None           # Exponential moving variance of returns (i.e., critic targets).
@@ -139,20 +142,22 @@ if __name__ == '__main__':
         # Reset environment at the start of each episode, and clear accumulators.
         state = env.reset()
         episodic_reward = 0
-        states = []
-        actions = []
-        rewards = []
 
-        # Sample a trajectory (episode) according to our stochastic policy/environment dynamics.
+        replaybuffer.clear()
+        # Sample a trajectory (episode) according to the stochastic policy with environment dynamics.
         for t in range(max_steps):
-            states.append(state)
+            replaybuffer.add_obs(state)
+
             action_distribution = policy(state)
             key, sample_key = jax.random.split(key)
             action = np.array(action_distribution.sample(sample_key))  # Leave JAX to interact with gym.
             state, reward, done, _ = env.step(action)
             episodic_reward += reward
-            actions.append(action)
-            rewards.append(reward)
+
+            replaybuffer.add_action(action)
+
+            replaybuffer.add_reward(reward)
+
             if render and i_episode % render_interval == 0:
                 env.render()
             if done:
@@ -160,29 +165,38 @@ if __name__ == '__main__':
 
         # Compute (standardized) tail returns for the episode and update moving averages.
         episodic_rewards.append(episodic_reward)
-        returns = compute_returns(rewards, discount_factor)
+        returns = compute_returns(replaybuffer.rewards, discount_factor)
         
         return_ema = returns.mean()
         return_emv = returns.var()
+
+        # for smoothing visualization
         episodic_reward_ema = 0.95 * episodic_reward_ema + (1 - 0.95) * episodic_reward
+        smooth_episodic_rewards.append(episodic_reward_ema)
         # Normalization
         standardized_returns = (returns - return_ema) / (np.sqrt(return_emv) + 1e-6)
 
         # Run a train step based on the episode's data.
-        num_steps = len(states)
+        num_steps = len(replaybuffer.rewards)
 
-        # JAX prefers all arrays to be the same shape for jitting, so we pad to the batch size.
+        # JAX prefers all arrays to be the same shape for jitting operation, so pad all the array.
         opt_state, policy = train_step_for_episode(
             opt_state,
             policy,
-            np.pad( states, ((0, max_steps - num_steps), (0, 0)) ),
-            np.pad( actions, ((0, max_steps - num_steps), (0, 0)) ),
+            np.pad( replaybuffer.observations, ((0, max_steps - num_steps), (0, 0)) ),
+            np.pad( replaybuffer.actions, ((0, max_steps - num_steps), (0, 0)) ),
             np.pad( standardized_returns, ((0, max_steps - num_steps),) ),
             num_steps,
         )
 
         # Periodically log results.
         if i_episode % 10 == 0:
-            print(
-                f"Episode {i_episode}\tLast reward: {episodic_reward:.2f}\tMoving average reward: {episodic_reward_ema:.2f}"
-            )
+            print(f"Episode {i_episode}\tLast reward: {episodic_reward:.2f}\tMoving average reward: {episodic_reward_ema:.2f}")
+
+        if episodic_reward_ema > 580:
+            break
+
+    plt.figure(1)
+    plt.plot(episodic_rewards)
+    plt.plot(smooth_episodic_rewards)
+    plt.show()
