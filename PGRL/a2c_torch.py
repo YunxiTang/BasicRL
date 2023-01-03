@@ -5,7 +5,6 @@ import torch.optim as optim
 import torch.distributions as distributions
 import numpy as np
 import gym
-import itertools
 
 
 if torch.cuda.is_available():
@@ -67,14 +66,16 @@ class ReplayBuffer:
             for i in range(max_eplen):
                 # sample a single rollouts
                 path.add_state(state)
-                action = agent.select_action(state)
+                action, action_logpdf = agent.select_action(state)
                 path.add_action(action)
+                path.add_logprob(action_logpdf)
                 state, reward, done, _, _  = env.step(action)
+                path.add_reward(reward)
                 if render and ns==(Ns-1):
                     env.render()
                 
                 episode_reward += reward
-                path.add_reward(reward)
+                
                 if done:
                     self.add_rollouts(path)
                     break
@@ -141,7 +142,8 @@ class Agent:
         state_tensor = from_numpy(x)
         dist = self.actor(state_tensor)
         action = dist.sample()
-        return to_numpy(action).reshape(self.act_dim,)
+        action_logpdf = dist.log_prob(action)
+        return to_numpy(action).reshape(self.act_dim,), to_numpy(action_logpdf)
     
     def update(self, buffer: ReplayBuffer, gamma: float, use_advatage: bool = False):
         # update the policy
@@ -159,6 +161,7 @@ class Agent:
             actions_dist = self.actor(states_tensor)
         
             actions_logpdf = actions_dist.log_prob(actions_tensor)
+
             # compute returns
             returns = from_numpy( compute_returns(rewards, gamma) )
 
@@ -166,16 +169,16 @@ class Agent:
             returns = (returns - returns.mean()) / (returns.std() + 1e-6)
 
             if use_advatage:
-              val_pred = self.critic(states_tensor)
-              L_critic = self.critic_lossfunc(val_pred, returns.reshape(val_pred.shape))
-              critic_losses.append(L_critic)
+                val_pred = self.critic(states_tensor)
+                L_critic = self.critic_lossfunc(val_pred, returns.reshape(val_pred.shape))
+                critic_losses.append(L_critic)
 
-              # compute advantages, detach the val_pred from computational gragh
-              values = val_pred.detach()
+                # compute advantages, detach the val_pred from computational gragh
+                values = val_pred.detach()
               
-              advantages = returns - values.squeeze()
+                advantages = returns - values.squeeze()
             else:
-              advantages = returns
+                advantages = returns
 
             L_actor = -(actions_logpdf * advantages).sum()
             actor_losses.append(L_actor)
@@ -221,7 +224,7 @@ if __name__ == '__main__':
     env = gym.make('InvertedDoublePendulum-v4', new_step_api=True)
 
     buffer = ReplayBuffer()
-    res = train(env, agent, buffer, Ns=10, render=False, max_episode=int(5e3), use_advatage=bool(0))
+    res = train(env, agent, buffer, Ns=5, render=False, max_episode=int(5e3), use_advatage=bool(0))
     import matplotlib.pyplot as plt
     plt.figure(2)
     plt.plot(res, 'k-')
