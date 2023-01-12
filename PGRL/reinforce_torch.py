@@ -166,16 +166,16 @@ class Agent:
             returns = (returns - returns.mean()) / (returns.std() + 1e-6)
 
             if use_advatage:
-              val_pred = self.critic(states_tensor)
-              L_critic = self.critic_lossfunc(val_pred, returns.reshape(val_pred.shape))
-              critic_losses.append(L_critic)
+                val_pred = self.critic(states_tensor)
+                L_critic = self.critic_lossfunc(val_pred, returns.reshape(val_pred.shape))
+                critic_losses.append(L_critic)
 
-              # compute advantages, detach the val_pred from computational gragh
-              values = val_pred.detach()
+                # compute advantages, detach the val_pred from computational gragh
+                values = val_pred.detach()
               
-              advantages = returns - values.squeeze()
+                advantages = returns - values.squeeze()
             else:
-              advantages = returns
+                advantages = returns
 
             L_actor = -(actions_logpdf * advantages).sum()
             actor_losses.append(L_actor)

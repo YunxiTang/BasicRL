@@ -1,255 +1,19 @@
-"""ppo"""
+"""ppo-clip in pytorch"""
 import torch
 import torch.nn as nn
+import torch.optim as optim
 import torch.distributions as distributions
-import torch.nn.functional as F
 import numpy as np
-import matplotlib.pyplot as plt
+import gym
+import random, os
 
-import random
-from collections import deque
-import pickle
 
-class Actor(nn.Module):
-    """actor net for discrete action space"""
-    def __init__(self, input_dim, output_dim, hidden_dim=256):
-        super(Actor, self).__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, output_dim)
+if torch.cuda.is_available():
+    device = torch.device('cuda:0')
+else:
+    device = torch.device('cpu')
 
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        logits = self.fc3(x)
-        probs = F.softmax(logits, dim=1)
-        return distributions.Categorical(probs)
-
-class Critic(nn.Module):
-    """critic net"""
-    def __init__(self, input_dim, output_dim, hidden_dim=256):
-        super(Critic, self).__init__()
-        assert output_dim == 1, 'output dim of critic can only be 1'
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, output_dim)
-
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        value = self.fc3(x)
-        return value
-
-class ReplayBufferQue:
-    '''replay buffer for DQN'''
-    def __init__(self, capacity: int = int(1e5)):
-        self.capacity = capacity
-        self.buffer = deque(maxlen=self.capacity)
-
-    def push(self, transitions):
-        '''
-            add trainsitions: tuple
-        '''
-        self.buffer.append(transitions)
-
-    def sample(self, 
-               batch_size: int, 
-               sequential: bool = False):
-
-        if batch_size > len(self.buffer):
-            batch_size = len(self.buffer)
-        
-        # sequential sampling
-        if sequential: 
-            rand = random.randint(0, len(self.buffer) - batch_size)
-            batch = [self.buffer[i] for i in range(rand, rand + batch_size)]
-            return zip(*batch)
-
-        else:
-            batch = random.sample(self.buffer, batch_size)
-            return zip(*batch)
-
-    def clear(self):
-        self.buffer.clear()
-
-    def __len__(self):
-        return len(self.buffer)
-
-class ReplayBufferPG(ReplayBufferQue):
-    '''
-        repaly buffer for PG inherited from ReplayBufferQue
-    '''
-    def __init__(self):
-        self.buffer = deque()
-
-    def sample(self):
-        ''' 
-            sample all the transitions
-        '''
-        batch = list(self.buffer)
-        return zip(*batch)
-
-class Agent:
-    """rl agent"""
-    def __init__(self, config):
-        """
-            config: experimental configuration
-        """
-        self.gamma = config.gamma
-        self.device = torch.device(config.device) 
-
-        self.actor = Actor(config.n_states, config.n_actions, hidden_dim = config.actor_hidden_dim).to(self.device)
-        self.critic = Critic(config.n_states, 1, hidden_dim=config.critic_hidden_dim).to(self.device)
-
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=config.actor_lr)
-        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=config.critic_lr)
-
-        self.buffer = ReplayBufferPG()
-        self.k_epochs = config.k_epochs         # update policy for K epochs
-        self.eps_clip = config.eps_clip         # clip parameter for PPO
-        self.entropy_coef = config.entropy_coef # entropy coefficient
-
-        self.step_count = 0
-        self.update_freq = config.update_freq
-
-    def sample_action(self, state):
-        self.step_count += 1
-        state_tensor = torch.tensor(state, device=self.device, dtype=torch.float32).unsqueeze(dim=0) # ? why unsqueeze ?
-        dist = self.actor(state_tensor)
-        action = dist.sample()
-        self.log_probs = dist.log_prob(action).detach()
-        return action.detach().cpu().numpy().item()
-
-    @torch.no_grad()
-    def predict_action(self, state):
-        state = torch.tensor(state, device=self.device, dtype=torch.float32).unsqueeze(dim=0)
-        dist = self.actor(state)
-        action = dist.sample()
-        return action.detach().cpu().numpy().item()
-
-    def update(self):
-        # update policy every n steps
-        if self.step_count % self.update_freq != 0:
-            return
-        old_states, old_actions, old_log_probs, old_rewards, old_dones = self.buffer.sample()
-        # convert to tensor
-        old_states = torch.tensor(np.array(old_states), device=self.device, dtype=torch.float32)
-        old_actions = torch.tensor(np.array(old_actions), device=self.device, dtype=torch.float32)
-        old_log_probs = torch.tensor(old_log_probs, device=self.device, dtype=torch.float32)
-        # monte carlo estimate of state rewards
-        returns = []
-        discounted_sum = 0
-        for reward, done in zip(reversed(old_rewards), reversed(old_dones)):
-            if done:
-                discounted_sum = 0
-            discounted_sum = reward + (self.gamma * discounted_sum)
-            returns.insert(0, discounted_sum)
-        # Normalizing the rewards:
-        returns = torch.tensor(returns, device=self.device, dtype=torch.float32)
-        returns = (returns - returns.mean()) / (returns.std() + 1e-5)
-
-        for _ in range(self.k_epochs):
-            # compute advantage
-            values = self.critic(old_states) 
-            # detach to avoid backprop through the critic
-            advantage = returns - values.detach()
-            # get action probabilities
-            dist = self.actor(old_states)
-
-            # get new action probabilities
-            new_probs = dist.log_prob(old_actions)
-            # compute ratio (pi_theta / pi_theta__old):
-            # old_log_probs must be detached
-            ratio = torch.exp(new_probs - old_log_probs) 
-            # compute surrogate loss
-            surr1 = ratio * advantage
-            surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * advantage
-            # compute actor loss
-            actor_loss = -torch.min(surr1, surr2).mean() + self.entropy_coef * dist.entropy().mean()
-            # compute critic loss
-            critic_loss = (returns - values).pow(2).mean()
-            # take gradient step
-            self.actor_optimizer.zero_grad()
-            self.critic_optimizer.zero_grad()
-            actor_loss.backward()
-            critic_loss.backward()
-            self.actor_optimizer.step()
-            self.critic_optimizer.step()
-        self.buffer.clear()
-
-import copy
-def train(cfg, env, agent):
-    ''' 
-        training
-    '''
-    print("=================")
-    # rewards trace
-    rewards = []  
-    steps = []
-    # max episode reaards
-    best_ep_reward = 0 
-    output_agent = None
-
-    for i_ep in range(cfg.train_eps):
-        # reward for one episode
-        ep_reward = 0  
-        ep_step = 0
-
-        # reset
-        state = env.reset()  
-        for _ in range(cfg.max_steps):
-            ep_step += 1
-            # sample an action
-            action = agent.sample_action(state)  
-            # leave to interact with env，return a transition tupel 
-
-            next_state, reward, done, _ = env.step(action)  
-            # save the transition in replay buffer
-            agent.buffer.push((state, action, agent.log_probs, reward, done)) 
-            # update the env state
-            state = next_state  
-            # update the agent
-            agent.update()  
-            # accumulating rewards
-            ep_reward += reward  
-            if done:
-                break
-
-        if (i_ep+1) % cfg.eval_per_episode == 0:
-            # evalutaion
-            sum_eval_reward = 0
-            for _ in range(cfg.eval_eps):
-                eval_ep_reward = 0
-                state = env.reset()
-                for _ in range(cfg.max_steps):
-                    # sample an action
-                    action = agent.predict_action(state)  
-                    next_state, reward, done, _ = env.step(action)  
-                    state = next_state  
-                    eval_ep_reward += reward 
-                    if done:
-                        break
-                sum_eval_reward += eval_ep_reward
-            mean_eval_reward = sum_eval_reward/cfg.eval_eps
-            if mean_eval_reward >= best_ep_reward:
-                best_ep_reward = mean_eval_reward
-                output_agent = copy.deepcopy(agent)
-                print(f"episode: {i_ep+1}/{cfg.train_eps}, \
-                       ep_reward: {ep_reward:.2f}, \
-                       mean_eval_reward: {mean_eval_reward:.2f}, \
-                       best_eval_reward: {best_ep_reward:.2f}")
-            else:
-                print(f"episode: {i_ep+1}/{cfg.train_eps}, \
-                       ep_reward: {ep_reward:.2f}, \
-                       mean_eval_reward: {mean_eval_reward:.2f}, \
-                       best_eval_reward: {best_ep_reward:.2f}")
-        steps.append(ep_step)
-        rewards.append(ep_reward)
-    print("Done with training...")
-    env.close()
-    return output_agent, {'rewards':rewards}
-
-def all_seed(env, seed = 1):
+def set_seeds(env, seed = 1):
     ''' 
         set seeds
     '''
@@ -266,73 +30,294 @@ def all_seed(env, seed = 1):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.enabled = False
 
-def env_agent_config(cfg):
-    env = gym.make(cfg.env_name)
-    all_seed(env,seed=cfg.seed)
-    n_states = env.observation_space.shape[0]
-    n_actions = env.action_space.n
-    print(f"state_dim: {n_states}, act_dim: {n_actions}")
-    # svae n_states and n_actions in cfg
-    setattr(cfg, 'n_states', n_states)
-    setattr(cfg, 'n_actions', n_actions) 
-    agent = Agent(cfg)
-    return env, agent
 
+# utils 
+def to_numpy(tensor):
+    return tensor.to('cpu').detach().numpy()
 
-class Config:
-    def __init__(self) -> None:
-        self.env_name = "CartPole-v1" # 环境名字
-        self.new_step_api = False # 是否用gym的新api
-        self.algo_name = "PPO" # 算法名字
-        self.mode = "train" # train or test
-        self.seed = 1 # 随机种子
-        self.device = "cpu" # device to use
-        self.train_eps = 400 # 训练的回合数
-        self.test_eps = 20 # 测试的回合数
-        self.max_steps = 200 # 每个回合的最大步数
-        self.eval_eps = 5 # 评估的回合数
-        self.eval_per_episode = 10 # 评估的频率
+def from_numpy(x):
+    """put a variable to a device tensor"""
+    return torch.from_numpy(x).float().to(device)
 
-        self.gamma = 0.99 # 折扣因子
-        self.k_epochs = 4 # 更新策略网络的次数
-        self.actor_lr = 0.0003 # actor网络的学习率
-        self.critic_lr = 0.0003 # critic网络的学习率
-        self.eps_clip = 0.2 # epsilon-clip
-        self.entropy_coef = 0.01 # entropy的系数
-        self.update_freq = 100 # 更新频率
-        self.actor_hidden_dim = 256 # actor网络的隐藏层维度
-        self.critic_hidden_dim = 256 # critic网络的隐藏层维度
+class rollout:
+    """a complete trajectory"""
+    def __init__(self):
+        self.states = []
+        self.actions = []
+        self.logprobs = []
+        self.rewards = []
+        self.next_states = []
+        
+    def add_state(self, state):
+        self.states.append(state)
+        return None
+    
+    def add_action(self, action):
+        self.actions.append(action)
+        return None
+    
+    def add_logprob(self, logprob):
+        self.logprobs.append(logprob)
+        return None
+    
+    def add_reward(self, reward):
+        self.rewards.append(reward)
+        return None
 
-def smooth(data, weight=0.9):  
-    '''smooth the plotted curve
-    '''
-    last = data[0] 
+    def add_next_state(self, next_state):
+        self.next_states.append(next_state)
+        return None
+        
+    @property
+    def length(self):
+        return len(self.rewards)
 
-    smoothed = []
-    for point in data:
-        smoothed_val = last * weight + (1 - weight) * point  # 计算平滑值
-        smoothed.append(smoothed_val)                    
-        last = smoothed_val                                
-    return smoothed
+class ReplayBuffer:
+    """replay buffer"""
+    def __init__(self, max_capacity: int = 1000):
+        self.rollouts = []
+        self.steps = 0
+        
+    def add_rollouts(self, path: rollout):
+        assert len(path.actions) == len(path.logprobs) == len(path.rewards) == len(path.next_states) == len(path.states), \
+              'Lengthes of <s, a, a_logprob, r, s_next> in path do not match'
+        self.rollouts.append(path)
+        return None
 
-def plot_rewards(rewards,cfg, tag='train'):
-    ''' 画图
-    '''
-    plt.figure()  # 创建一个图形实例，方便同时多画几个图
-    plt.title(f"{tag}ing curve on {cfg.device} of {cfg.algo_name} for {cfg.env_name}")
-    plt.xlabel('epsiodes')
-    plt.plot(rewards, label='rewards')
-    plt.plot(smooth(rewards), label='smoothed')
-    plt.legend()
-    plt.show()
+    def sample_rollouts(self, agent, env, max_eplen = 200, Ns=1, render: bool = False):
+        """sample Ns rollouts"""
+        episode_reward = 0.
+        for ns in range(Ns):
+            path = rollout()
+            state = env.reset()
+            steps = 0
+            while True:
+                # sample a single rollout
+                action, action_logpdf = agent.select_action(state)
 
+                path.add_state(state)
+                path.add_action(action)
+                path.add_logprob(action_logpdf)
+                state, reward, done, _, _  = env.step(action)
+                self.steps += 1
+                steps += 1
+                path.add_reward(reward)
+                path.add_next_state(state)
+
+                if render and ns==(Ns-1):
+                    # only render the last sampled rollout
+                    env.render()
+                
+                episode_reward += reward
+                rollout_done = (done or steps == max_eplen)
+                if rollout_done:
+                    break
+
+            self.add_rollouts(path)
+        return episode_reward / Ns
+    
+    @property
+    def length(self):
+        return len(self.rollouts)
+    
+    def clear(self):
+        self.rollouts = []
+        return None
+
+def compute_qvals(rewards, discount_factor):
+    """Compute Q values using Monte Carlo estimation
+       rewards: rewards_list"""
+    tail_return = 0.
+    qvals = []
+    for r in rewards[::-1]:
+        tail_return = r + discount_factor * tail_return
+        qvals.append(tail_return)
+    qvals.reverse()
+    return np.array(qvals)
+
+class Actor(nn.Module):
+    def __init__(self, obs_dim, act_dim, hidden_dim=256):
+        super(Actor, self).__init__()
+        self.mean_net = nn.Sequential(nn.Linear(obs_dim, hidden_dim), nn.Tanh(),
+                                      nn.Linear(hidden_dim, hidden_dim), nn.Tanh(),
+                                      nn.Linear(hidden_dim, act_dim))
+        self.std = nn.Parameter(torch.zeros((act_dim, ), dtype=torch.float32))
+        
+    def forward(self, x):
+        """only handle batched operations"""
+        batched_mean = self.mean_net(x)
+        
+        batch_dim = batched_mean.shape[0]
+        single_scale_tril = torch.diag(self.std.exp())
+        batched_std = single_scale_tril.repeat(batch_dim, 1, 1)
+        return distributions.MultivariateNormal(batched_mean, scale_tril=batched_std)
+
+class Critic(nn.Module):
+    def __init__(self, obs_dim, value_dim, hidden_dim=256):
+        super(Critic, self).__init__()
+        assert value_dim == 1, 'output dim of critic net can only be 1'
+        self.value_net = nn.Sequential(nn.Linear(obs_dim, hidden_dim), nn.Tanh(),
+                                       nn.Linear(hidden_dim, hidden_dim), nn.Tanh(),
+                                       nn.Linear(hidden_dim, value_dim))
+    
+    def forward(self, x):
+        return self.value_net(x)
+         
+
+class Agent:
+    def __init__(self, obs_dim, act_dim):
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
+        self.actor = Actor(obs_dim, act_dim).to(device)
+        self.critic = Critic(obs_dim, 1).to(device)
+
+        self.eps_clip = 0.2
+        
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=1e-4)
+        self.critic_optimzer = optim.Adam(self.critic.parameters(), lr=1e-4)
+        
+        self.critic_lossfunc = nn.MSELoss()
+    
+    @torch.no_grad()
+    def select_action(self, x: np.array):
+        if len(x.shape) == 1:
+            x = x[None]
+        state_tensor = from_numpy(x)
+        
+        dist = self.actor(state_tensor)
+        action = dist.sample()
+        
+        action_logpdf = dist.log_prob(action)
+        return to_numpy(action).reshape(self.act_dim,), to_numpy(action_logpdf)
+
+    def update_critic(self, buffer: ReplayBuffer, gamma: float):
+        """update the critic net"""
+        critic_losses = []
+        for path in buffer.rollouts:
+            states = np.array(path.states)
+            rewards = np.array(path.rewards)
+            states_tensor = from_numpy(states)
+            # compute Q(s, a) values
+            qvals = from_numpy( compute_qvals(rewards, gamma) )
+            # Querying critic net which estimate V(s_t) function
+            state_vals_pred = self.critic(states_tensor)
+            # Critic Loss
+            # Monte-Carlo Estimation of V(s_t) using q_vals
+            val_target = qvals
+            L_critic = self.critic_lossfunc(state_vals_pred, val_target.reshape(state_vals_pred.shape))
+            critic_losses.append(L_critic)  
+            
+        self.critic_optimzer.zero_grad()
+        critic_loss = sum(critic_losses).mean()
+        critic_loss.backward()
+        self.critic_optimzer.step()
+        return None
+
+    
+    def update_actor(self, buffer: ReplayBuffer, gamma: float, use_advatage: bool = False):
+        # update the policy
+        
+        actor_losses = []
+        
+        for path in buffer.rollouts:
+            states = np.array(path.states)
+            actions = np.array(path.actions)
+            action_logprobs = np.array(path.logprobs)
+            rewards = np.array(path.rewards)
+            next_states = np.array(path.next_states)
+            
+            states_tensor = from_numpy(states)
+            actions_tensor = from_numpy(actions)
+            # log-probabilities with old policy 
+            old_action_logprobs_tensor = from_numpy(action_logprobs)
+            next_states_tensor = from_numpy(next_states)
+            rewards_tensor = from_numpy(rewards)
+
+            # log-probabilities with updated policy
+            actions_dist = self.actor(states_tensor)
+            actions_logpdf = actions_dist.log_prob(actions_tensor)
+
+            # ratio for importance sampling
+            ratio = torch.exp(actions_logpdf - old_action_logprobs_tensor)
+
+            # compute Q(s, a) values
+            qvals = from_numpy( compute_qvals(rewards, gamma) )
+
+            if use_advatage:
+                # Querying critic net which estimate V(s_t) function
+                state_vals_pred = self.critic(states_tensor)
+                # compute advantages, detach the val_pred from computational gragh
+                # advantages contain no gradient information
+                values = state_vals_pred.detach().clone()
+                tmp = rewards_tensor + gamma * self.critic(next_states_tensor).detach().reshape(rewards_tensor.shape)
+                advantages = tmp - values.reshape(rewards_tensor.shape)
+                   
+            else:
+                # just set the advantage to [Q]s
+                advantages = qvals
+
+            # Advantages Normalization
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-6)
+            # compute surrogate loss
+            surr1 = ratio * advantages
+            surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * advantages 
+            L_actor = (-torch.min(surr1, surr2)).sum() + 0.002 * actions_dist.entropy().mean()
+            actor_losses.append(L_actor)
+        
+        self.actor_optimizer.zero_grad()
+        actor_loss = sum(actor_losses).mean()
+        actor_loss.backward()
+        self.actor_optimizer.step()
+        return None
+
+    def ppo_update(self, buffer: ReplayBuffer, gamma: float, use_advatage: bool = False):
+        assert buffer.length > 0, 'Buffer is empty! Sample some data firstly!'
+        
+        for _ in range(3):
+            self.update_actor(buffer, gamma, use_advatage)
+            self.update_critic(buffer, gamma)
+        return None
+        
+        
+    
+def train(env: gym.Env, agent: Agent, buffer: ReplayBuffer, render=False, use_advatage=False, max_episode=500, max_eplen=1000, Ns=10, gamma=0.98):
+    """training"""
+    res = []
+    for episode in range(max_episode):
+        episode_reward = buffer.sample_rollouts(agent, env, max_eplen=max_eplen, Ns=Ns, render=render)
+                
+        if episode == 0:
+            smooth_episode_reward = episode_reward
+        else:
+            smooth_episode_reward = 0.95 * smooth_episode_reward + 0.05 * episode_reward
+
+        res.append(smooth_episode_reward)
+        agent.ppo_update(buffer, gamma, use_advatage)
+        
+        if episode % 100 == 0:
+            print(f'+---------- Episode: {episode} (Env Steps: {buffer.steps}) ----------+')
+            print(f'Traj_num: {buffer.length} || Last Reward: {episode_reward} || Episode Reward: {smooth_episode_reward}')
+            print('+----------------------------------------------------+')
+        buffer.clear()
+    return res
+    
 if __name__ == '__main__':
-    import gym
-    import os
-    import numpy as np
-    cfg = Config() 
-    # train
-    env, agent = env_agent_config(cfg)
-    best_agent,res_dic = train(cfg, env, agent)
-    plot_rewards(res_dic['rewards'], cfg, tag="train")  
+    np.set_printoptions(precision=3, suppress=True)
+    
+    env = gym.make('InvertedDoublePendulum-v4', new_step_api=True)
+    # env = gym.make('HumanoidStandup-v4', new_step_api=True)
+    # env = gym.make('Walker2d-v4', new_step_api=True)
+    
+    act_shape = env.action_space.shape
+    obs_shape = env.observation_space.shape
+
+    agent = Agent(obs_shape[0], act_shape[0])
+
+    buffer = ReplayBuffer()
+    res = train(env, agent, buffer, Ns=1, render=bool(0), max_episode=int(5e4), max_eplen=1000, use_advatage=bool(1))
+
+    import matplotlib.pyplot as plt
+    plt.figure(2)
+    plt.plot(res, 'k-')
+    plt.show()
     
