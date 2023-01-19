@@ -11,21 +11,19 @@ from collections import deque
 import pickle
 
 class Actor(nn.Module):
-    """actor net for continuous action space"""
+    """actor net for discrete action space"""
     def __init__(self, input_dim, output_dim, hidden_dim=256):
         super(Actor, self).__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, output_dim)
 
-        self.std = nn.Parameter(torch.zeros((output_dim,), dtype=torch.float32))
-
     def forward(self, x):
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
-        act_mean = self.fc3(x)
-
-        return distributions.MultivariateNormal(loc=act_mean, scale_tril=torch.diag(self.std.exp()))
+        logits = self.fc3(x)
+        probs = F.softmax(logits, dim=1)
+        return distributions.Categorical(probs)
 
 class Critic(nn.Module):
     """critic net"""
@@ -100,8 +98,8 @@ class Agent:
         self.gamma = config.gamma
         self.device = torch.device(config.device) 
 
-        self.actor = Actor(config.state_dim, config.act_dim, hidden_dim = config.actor_hidden_dim).to(self.device)
-        self.critic = Critic(config.state_dim, 1, hidden_dim=config.critic_hidden_dim).to(self.device)
+        self.actor = Actor(config.n_states, config.n_actions, hidden_dim = config.actor_hidden_dim).to(self.device)
+        self.critic = Critic(config.n_states, 1, hidden_dim=config.critic_hidden_dim).to(self.device)
 
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=config.actor_lr)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=config.critic_lr)
@@ -116,18 +114,18 @@ class Agent:
 
     def sample_action(self, state):
         self.step_count += 1
-        state_tensor = torch.tensor(state, device=self.device, dtype=torch.float32)
+        state_tensor = torch.tensor(state, device=self.device, dtype=torch.float32).unsqueeze(dim=0) # ? why unsqueeze ?
         dist = self.actor(state_tensor)
         action = dist.sample()
         self.log_probs = dist.log_prob(action).detach()
-        return action.detach().cpu().numpy()
+        return action.detach().cpu().numpy().item()
 
     @torch.no_grad()
     def predict_action(self, state):
-        state = torch.tensor(state, device=self.device, dtype=torch.float32)
+        state = torch.tensor(state, device=self.device, dtype=torch.float32).unsqueeze(dim=0)
         dist = self.actor(state)
         action = dist.sample()
-        return action.detach().cpu().numpy()
+        return action.detach().cpu().numpy().item()
 
     def update(self):
         # update policy every n steps
@@ -206,7 +204,6 @@ def train(cfg, env, agent):
             # leave to interact with env，return a transition tupel 
 
             next_state, reward, done, _ = env.step(action)  
-            # reward += -(state[0]-0.45)**2
             # save the transition in replay buffer
             agent.buffer.push((state, action, agent.log_probs, reward, done)) 
             # update the env state
@@ -228,7 +225,6 @@ def train(cfg, env, agent):
                     # sample an action
                     action = agent.predict_action(state)  
                     next_state, reward, done, _ = env.step(action)  
-                    env.render()
                     state = next_state  
                     eval_ep_reward += reward 
                     if done:
@@ -273,24 +269,27 @@ def all_seed(env, seed = 1):
 def env_agent_config(cfg):
     env = gym.make(cfg.env_name)
     all_seed(env,seed=cfg.seed)
-    
-    setattr(cfg, 'state_dim', 24)
-    setattr(cfg, 'act_dim', 4) 
+    n_states = env.observation_space.shape[0]
+    n_actions = env.action_space.n
+    print(f"state_dim: {n_states}, act_dim: {n_actions}")
+    # svae n_states and n_actions in cfg
+    setattr(cfg, 'n_states', n_states)
+    setattr(cfg, 'n_actions', n_actions) 
     agent = Agent(cfg)
     return env, agent
 
 
 class Config:
     def __init__(self) -> None:
-        self.env_name = "BipedalWalker-v3" # 环境名字
+        self.env_name = "CartPole-v1" # 环境名字
         self.new_step_api = False # 是否用gym的新api
         self.algo_name = "PPO" # 算法名字
         self.mode = "train" # train or test
         self.seed = 1 # 随机种子
         self.device = "cpu" # device to use
-        self.train_eps = 1000 # 训练的回合数
+        self.train_eps = 400 # 训练的回合数
         self.test_eps = 20 # 测试的回合数
-        self.max_steps = 500 # 每个回合的最大步数
+        self.max_steps = 200 # 每个回合的最大步数
         self.eval_eps = 5 # 评估的回合数
         self.eval_per_episode = 10 # 评估的频率
 
@@ -317,8 +316,7 @@ def smooth(data, weight=0.9):
     return smoothed
 
 def plot_rewards(rewards,cfg, tag='train'):
-    ''' 
-        plotter
+    ''' 画图
     '''
     plt.figure()  # 创建一个图形实例，方便同时多画几个图
     plt.title(f"{tag}ing curve on {cfg.device} of {cfg.algo_name} for {cfg.env_name}")

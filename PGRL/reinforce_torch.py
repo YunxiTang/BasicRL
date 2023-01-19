@@ -7,6 +7,7 @@ import numpy as np
 import gym
 import itertools
 
+
 if torch.cuda.is_available():
     device = torch.device('cuda:0')
 else:
@@ -56,6 +57,28 @@ class ReplayBuffer:
     def add_rollouts(self, rollout):
         self.rollouts.append(rollout)
         return None
+
+    def sample_rollouts(self, agent, env, max_eplen = 200, Ns=1, render: bool = False):
+        """sample Ns rollouts"""
+        episode_reward = 0.
+        for ns in range(Ns):
+            path = rollout()
+            state = env.reset()
+            for i in range(max_eplen):
+                # sample a single rollouts
+                path.add_state(state)
+                action = agent.select_action(state)
+                path.add_action(action)
+                state, reward, done, _, _  = env.step(action)
+                if render and ns==(Ns-1):
+                    env.render()
+                
+                episode_reward += reward
+                path.add_reward(reward)
+                if done:
+                    self.add_rollouts(path)
+                    break
+        return episode_reward
     
     @property
     def length(self):
@@ -101,9 +124,8 @@ class Critic(nn.Module):
         return self.value_net(x)
          
 
-class MLPPolicy(nn.Module):
+class Agent:
     def __init__(self, obs_dim, act_dim):
-        super(MLPPolicy, self).__init__()
         self.obs_dim = obs_dim
         self.act_dim = act_dim
         self.actor = Actor(obs_dim, act_dim).to(device)
@@ -123,6 +145,7 @@ class MLPPolicy(nn.Module):
     
     def update(self, buffer: ReplayBuffer, gamma: float, use_advatage: bool = False):
         # update the policy
+        assert buffer.length > 0, 'Buffer is empty! Sample some data firstly!'
         actor_losses = []
         critic_losses = []
         for path in buffer.rollouts:
@@ -143,25 +166,25 @@ class MLPPolicy(nn.Module):
             returns = (returns - returns.mean()) / (returns.std() + 1e-6)
 
             if use_advatage:
-              val_pred = self.critic(states_tensor)
-              L_critic = self.critic_lossfunc(val_pred, returns.reshape(val_pred.shape))
-              critic_losses.append(L_critic)
+                val_pred = self.critic(states_tensor)
+                L_critic = self.critic_lossfunc(val_pred, returns.reshape(val_pred.shape))
+                critic_losses.append(L_critic)
 
-              # compute advantages, detach the val_pred from computational gragh
-              values = val_pred.detach()
+                # compute advantages, detach the val_pred from computational gragh
+                values = val_pred.detach()
               
-              advantages = returns - values.squeeze()
+                advantages = returns - values.squeeze()
             else:
-              advantages = returns
+                advantages = returns
 
             L_actor = -(actions_logpdf * advantages).sum()
             actor_losses.append(L_actor)
             
         if use_advatage:
-          self.critic_optimzer.zero_grad()
-          critic_loss = sum(critic_losses).mean()
-          critic_loss.backward()
-          self.critic_optimzer.step()
+            self.critic_optimzer.zero_grad()
+            critic_loss = sum(critic_losses).mean()
+            critic_loss.backward()
+            self.critic_optimzer.step()
 
         self.actor_optimizer.zero_grad()
         actor_loss = sum(actor_losses).mean()
@@ -171,56 +194,34 @@ class MLPPolicy(nn.Module):
         
         
     
-def train(env: gym.Env, policy: MLPPolicy, buffer: ReplayBuffer, render=False, use_advatage=False, max_episode=500, max_eplen=1000, Ns=10, gamma=0.98):
+def train(env: gym.Env, agent: Agent, buffer: ReplayBuffer, render=False, use_advatage=False, max_episode=500, max_eplen=1000, Ns=10, gamma=0.98):
     """training"""
     res = []
     for episode in range(max_episode):
-        episode_reward = 0.
-        
-        for ns in range(Ns):
-            # sampling Ns rollouts
-            path = rollout()
-            state = env.reset()
-            
-            for i in range(max_eplen):
-                # sample a single rollouts
-                path.add_state(state)
-                action = policy.select_action(state)
-                path.add_action(action)
-                
-                state, reward, done, _  = env.step(action)
-
-                if render and ns==(Ns-1) and episode % 20 == 0:
-                    env.render()
-                
-                episode_reward += reward
-                path.add_reward(reward)
-                if done:
-                    buffer.add_rollouts(path)
-                    break
+        episode_reward = buffer.sample_rollouts(agent, env, max_eplen=max_eplen, Ns=Ns, render=render)
                 
         if episode == 0:
             smooth_episode_reward = episode_reward
-
         else:
             smooth_episode_reward = 0.95 * smooth_episode_reward + 0.05 * episode_reward
 
         res.append(smooth_episode_reward/Ns)
-        policy.update(buffer, gamma, use_advatage)
+        agent.update(buffer, gamma, use_advatage)
         
-        if episode % 20 == 0:
+        if episode % 50 == 0:
             print('================================')
-            print(f'Episode: {episode} || Last Reward: {episode_reward/Ns} || Episode Reward: {smooth_episode_reward/Ns}')
+            print(f'Episode: {episode} || buffer_len: {buffer.length} || Last Reward: {episode_reward/Ns} || Episode Reward: {smooth_episode_reward/Ns}')
         
         buffer.clear()
     return res
     
 if __name__ == '__main__':
-    policy = MLPPolicy(11, 1)
-    env = gym.make('InvertedDoublePendulum-v4')
+    np.set_printoptions(precision=3, suppress=True)
+    agent = Agent(11, 1)
+    env = gym.make('InvertedDoublePendulum-v4', new_step_api=True)
 
     buffer = ReplayBuffer()
-    res = train(env, policy, buffer, Ns=5, render=True, max_episode=int(1e4), use_advatage=bool(1))
+    res = train(env, agent, buffer, Ns=10, render=False, max_episode=int(5e3), use_advatage=bool(0))
     import matplotlib.pyplot as plt
     plt.figure(2)
     plt.plot(res, 'k-')
