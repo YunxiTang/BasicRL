@@ -352,10 +352,10 @@ def train(env: gym.Env, agent: Agent, buffer: ReplayBuffer, render=False, max_tr
         if train_step % 5 == 0:
             print(f'+----------Train Step: {train_step} (Buffer Steps: {buffer.buffer_size}) ----------+')
             print(f'Last Ave. Batch Reward: {episode_reward} || Ave. Reward: {smooth_episode_reward}')
-            if train_step % 20 == 0:
-                evaluated_reward = evaluate_policy(env, agent)
-                print(f'Evaluated Reward: {evaluated_reward}')
-            print('+-------------------------------------------------------------------------------+')
+            # if train_step % 20 == 0:
+            #     evaluated_reward = evaluate_policy(env, agent)
+            #     print(f'Evaluated Reward: {evaluated_reward}')
+            # print('+-------------------------------------------------------------------------------+')
         buffer.clear()
     return res
 
@@ -370,11 +370,11 @@ def parse_args(env: gym.Env):
                                       help="max action")
     parser.add_argument("--mini_batch_size", type=int, default=100,
                                       help="mini_batch_size")
-    parser.add_argument("--buffer_capacity", type=int, default=1500,
+    parser.add_argument("--buffer_capacity", type=int, default=2048,
                                       help="buffer_capacity")
     parser.add_argument("--render", type=bool, default=False,
                                     help="render or not")
-    parser.add_argument("--max_train_steps", type=int, default=500,
+    parser.add_argument("--max_train_steps", type=int, default=1000,
                                     help="max training epoch")
                                     
 

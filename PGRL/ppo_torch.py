@@ -177,7 +177,6 @@ class Actor(nn.Module):
                                       nn.Linear(hidden_dim, hidden_dim), nn.Tanh(),
                                       nn.Linear(hidden_dim, act_dim), nn.Tanh())
         self.std = nn.Parameter(torch.zeros((act_dim, ), dtype=torch.float32))
-
         for layer in self.mean_net:
             if isinstance(layer, nn.Linear):
                 orthogonal_init(layer)
@@ -186,7 +185,8 @@ class Actor(nn.Module):
         batched_mean = self.mean_net(x)
         batched_mean = batched_mean * self.max_action
         batch_dim = batched_mean.shape[0]
-        single_scale_tril = torch.diag(self.std.exp())
+        std = torch.clamp(self.std, -2., 5.)
+        single_scale_tril = torch.diag(std.exp())
         batched_std = single_scale_tril.repeat(batch_dim, 1, 1)
         return distributions.MultivariateNormal(batched_mean, scale_tril=batched_std)
 
@@ -218,15 +218,15 @@ class Agent:
         self.mini_batch_size = args.mini_batch_size
         self.max_train_steps = args.max_train_steps
 
-        self.K_epochs = 5
+        self.lr_a = args.lr_a
+        self.lr_c = args.lr_c
+
+        self.K_epochs = args.K_epochs
         self.epsilon = 0.2
-        self.entropy_coef = 0.02
+        self.entropy_coef = 0.04
 
         self.actor = Actor(self.obs_dim, self.act_dim, args.max_action).to(device)
         self.critic = Critic(self.obs_dim, 1).to(device)
-
-        self.lr_a = args.lr_a
-        self.lr_c = args.lr_c
         
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr_a)
         self.critic_optimzer = optim.Adam(self.critic.parameters(), lr=self.lr_c)
@@ -268,12 +268,20 @@ class Agent:
 
     def update_actor(self, 
                     advantages,
+                    actions_dist,
                     logprobs_new_tensor,
                     logprobs_old_tensor,
                     ):
         """update the actor net"""
-        L_actor = -(logprobs_new_tensor * advantages).mean()
-        L_actor.backward()
+        ratios = torch.exp(logprobs_new_tensor - logprobs_old_tensor) 
+        # Only calculate the gradient of 'logprobs_new' in ratios
+        surr1 = ratios * advantages  
+        surr2 = torch.clamp(ratios, 1 - self.epsilon, 1 + self.epsilon) * advantages
+        dist_entropy = actions_dist.entropy()  
+        actor_loss = -torch.min(surr1, surr2) - self.entropy_coef * dist_entropy
+        # Update actor
+        self.actor_optimizer.zero_grad()
+        actor_loss.mean().backward()
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
         self.actor_optimizer.step()
         return None
@@ -291,35 +299,32 @@ class Agent:
 
         rtgs = compute_rtg(rewards_np, dones_np, gamma)
         qvals = from_numpy( rtgs )
+
         # compute advantages
+        # advantages contain no gradient information
         with torch.no_grad():
-            # advantages contain no gradient information
-            # Querying critic net which estimate V(s_t) function
-            values = self.critic(states_tensor)
-            # tmp = qvals
-            tmp = rewards_tensor + gamma * (1-dones_tensor) * self.critic(next_states_tensor).squeeze()
-            advantages = tmp - values.reshape(tmp.shape)
+            values = self.critic(states_tensor).squeeze()
+            next_values = self.critic(next_states_tensor).squeeze()
+            # print(rewards_tensor.shape, values.shape, next_values.shape)
+            if args.gae:
+                """use generalized advantage estimation"""
+                deltas = rewards_tensor + gamma * ( 1 - dones_tensor ) * next_values - values
+                adv = compute_rtg(to_numpy(deltas), dones_np, args.lamda*gamma)
+                advantages = from_numpy(adv)
+            else:
+                # Querying critic net which estimate V(s_t) function
+                tmp = rewards_tensor + gamma * ( 1 - dones_tensor ) * next_values # tmp = qvals is another choice
+                advantages = tmp - values
         # advantage normalization
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-5)
 
-        # Optimize policy for K epochs:
+        # optimize policy via ppo-clip
         for _ in range(self.K_epochs):
-            for index in BatchSampler(SubsetRandomSampler(range(buffer.buffer_size)), self.mini_batch_size, True):
+            for index in BatchSampler(SubsetRandomSampler(range(buffer.buffer_size)), self.mini_batch_size, False):
                 # this is for constructing the computational gragh
                 actions_dist = self.actor(states_tensor[index])
                 logprobs_new_tensor = actions_dist.log_prob(actions_tensor[index])
-                ratios = torch.exp(logprobs_new_tensor - logprobs_old_tensor[index])  # shape(mini_batch_size by 1)
-                # Only calculate the gradient of 'logprobs_new' in ratios
-                surr1 = ratios * advantages[index]  
-                surr2 = torch.clamp(ratios, 1 - self.epsilon, 1 + self.epsilon) * advantages[index]
-                dist_entropy = actions_dist.entropy()  # shape(mini_batch_size X 1)
-                actor_loss = -torch.min(surr1, surr2) - self.entropy_coef * dist_entropy  # Trick 5: policy entropy
-                # Update actor
-                self.actor_optimizer.zero_grad()
-                actor_loss.mean().backward()
-                torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
-                self.actor_optimizer.step()
-                # self.update_actor(advantages[index], logprobs_new_tensor, logprobs_old_tensor[index])
+                self.update_actor(advantages[index], actions_dist, logprobs_new_tensor, logprobs_old_tensor[index])
                 critic_loss = self.update_critic(qvals[index], states_tensor[index])
 
         self.lr_decay(train_step)
@@ -333,30 +338,32 @@ class Agent:
         for p in self.critic_optimzer.param_groups:
             p['lr'] = lr_c_now
 
-def evaluate_policy(env: gym.Env, agent: Agent, render: bool = False):
+def evaluate_policy(env: gym.Env, agent: Agent, max_episode_step, render: bool = False):
     times = 3
     evaluate_reward = 0
     for i in range(times):
         s = env.reset()
         done = False
         episode_reward = 0
-        while not done:
-            action = agent.evaluate(s)  # We use the deterministic policy during the evaluating
+        for _ in range(max_episode_step):
+            action = agent.evaluate(s)
             s_, r, done, _, _ = env.step(action)
-            if i == times-1 and render:
+            if i == times-1:
                 env.render()
             episode_reward += r
             s = s_
+            if done:
+                break
         evaluate_reward += episode_reward
 
     return evaluate_reward / times
 
     
-def train(env: gym.Env, agent: Agent, buffer: ReplayBuffer, render=False, max_train_steps=500, max_eplen=1000, gamma=0.98):
+def train(env: gym.Env, agent: Agent, buffer: ReplayBuffer, args):
     """training"""
     res = []
-    for train_step in range(max_train_steps):
-        episode_reward = buffer.sample_rollouts(agent, env, max_eplen=max_eplen, render=render)
+    for train_step in range(args.max_train_steps):
+        episode_reward = buffer.sample_rollouts(agent, env, max_eplen=args.max_episode_steps, render=args.render)
                 
         if train_step == 0:
             smooth_episode_reward = episode_reward
@@ -364,22 +371,21 @@ def train(env: gym.Env, agent: Agent, buffer: ReplayBuffer, render=False, max_tr
             smooth_episode_reward = 0.95 * smooth_episode_reward + 0.05 * episode_reward
 
         res.append(smooth_episode_reward)
-        agent.update(buffer, gamma, train_step)
+        agent.update(buffer, args.gamma, train_step)
         
         if train_step % 5 == 0:
-            print(f'+----------Train Step: {train_step} (Buffer Steps: {buffer.buffer_size}) ----------+')
+            print(f'+----------Train Iter.: {train_step} (Buffer Steps: {buffer.buffer_size}) ----------+')
             print(f'Last Ave. Batch Reward: {episode_reward} || Ave. Reward: {smooth_episode_reward}')
-            # if train_step % 20 == 0:
-            #     evaluated_reward = evaluate_policy(env, agent)
-            #     print(f'Evaluated Reward: {evaluated_reward}')
-                # if evaluated_reward > 1000:
-                #     break
-            print('+-------------------------------------------------------------------------------+')
+            if train_step % 20 == 0 and args.evaluate:
+                evaluated_reward = evaluate_policy(env, agent, max_eplen=args.max_episode_steps)
+                print(f'Evaluated Reward: {evaluated_reward}')
+            print('+-------------------------------------------------------------------------------+\n')
         buffer.clear()
     return res
 
 
 def parse_args(env: gym.Env):
+    """parameter settings"""
     parser = argparse.ArgumentParser()
     parser.add_argument("--obs_dim", type=int, default=env.observation_space.shape[0],
                                       help="obs/state dimension")
@@ -387,22 +393,33 @@ def parse_args(env: gym.Env):
                                       help="action dimension")
     parser.add_argument("--max_action", type=int, default=env.action_space.high,
                                       help="max action")
-    parser.add_argument("--mini_batch_size", type=int, default=100,
+    parser.add_argument("--mini_batch_size", type=int, default=50,
                                       help="mini_batch_size")
-    parser.add_argument("--buffer_capacity", type=int, default=2048,
+    parser.add_argument("--buffer_capacity", type=int, default=2000,
                                       help="buffer_capacity")
-    parser.add_argument("--render", type=bool, default=False,
-                                    help="render or not")
-    parser.add_argument("--max_train_steps", type=int, default=1000,
+    
+    parser.add_argument("--max_episode_steps", type=int, default=1000,
+                                    help="max episode length")
+    
+    parser.add_argument("--max_train_steps", type=int, default=100,
                                     help="max training epoch")
-                                    
 
-    parser.add_argument("--lr_a", type=float, default=2e-4,
+    parser.add_argument("--gae", type=bool, default=True,
+                                    help="use gae or not")
+    parser.add_argument("--lamda", type=float, default=0.0,
+                                    help="gae factor") # lamda=0, gae turns to be normal case
+    parser.add_argument("--gamma", type=float, default=0.99,
+                                    help="discount factor")
+    parser.add_argument("--K_epochs", type=int, default=5,
+                                    help="PPO inner update steps")
+    parser.add_argument("--lr_a", type=float, default=5e-4,
                                   help="actor learning rate")
-    parser.add_argument("--lr_c", type=float, default=2e-4,
+    parser.add_argument("--lr_c", type=float, default=5e-4,
                                   help="crtic learning rate")
     
-    parser.add_argument("--evaluate_policy", type=bool, default=False,
+    parser.add_argument("--render", type=bool, default=False,
+                                    help="render or not")
+    parser.add_argument("--evaluate", type=bool, default=False,
                                   help="evaluate_policy or not")
     args = parser.parse_args()
     return args
@@ -411,15 +428,16 @@ def parse_args(env: gym.Env):
 if __name__ == '__main__':
     np.set_printoptions(precision=3, suppress=True)
     
-    env = gym.make('InvertedDoublePendulum-v4', new_step_api=True)
-    # env = gym.make('HumanoidStandup-v4', new_step_api=True)
-    # env = gym.make('Walker2d-v4', new_step_api=True)
-    
+    env_platforms = ['InvertedDoublePendulum-v4', 'HumanoidStandup-v4', 'Walker2d-v4']
+    idx = 0
+    env = gym.make(env_platforms[idx], new_step_api=True)
+    set_seeds(env, seed=10086)
+
     args = parse_args(env)
     agent = Agent(args)
     buffer = ReplayBuffer(args)
 
-    res = train(env, agent, buffer, render=args.render, max_train_steps=args.max_train_steps, max_eplen=200)
+    res = train(env, agent, buffer, args)
 
     import matplotlib.pyplot as plt
     plt.figure(2)
