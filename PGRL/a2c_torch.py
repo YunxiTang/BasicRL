@@ -7,6 +7,10 @@ import numpy as np
 import gym
 import random, os
 
+def orthogonal_init(layer, gain=1.0):
+    nn.init.orthogonal_(layer.weight, gain=gain)
+    nn.init.constant_(layer.bias, 0)
+
 
 if torch.cuda.is_available():
     device = torch.device('cuda:0')
@@ -142,6 +146,10 @@ class Actor(nn.Module):
                                       nn.Linear(hidden_dim, hidden_dim), nn.Tanh(),
                                       nn.Linear(hidden_dim, act_dim))
         self.std = nn.Parameter(torch.zeros((act_dim, ), dtype=torch.float32))
+
+        for layer in self.mean_net:
+            if isinstance(layer, nn.Linear):
+                orthogonal_init(layer)
         
     def forward(self, x):
         batched_mean = self.mean_net(x)
@@ -158,6 +166,10 @@ class Critic(nn.Module):
         self.value_net = nn.Sequential(nn.Linear(obs_dim, hidden_dim), nn.Tanh(),
                                        nn.Linear(hidden_dim, hidden_dim), nn.Tanh(),
                                        nn.Linear(hidden_dim, value_dim))
+        
+        for layer in self.value_net:
+            if isinstance(layer, nn.Linear):
+                orthogonal_init(layer)
     
     def forward(self, x):
         return self.value_net(x)
@@ -170,8 +182,8 @@ class Agent:
         self.actor = Actor(obs_dim, act_dim).to(device)
         self.critic = Critic(obs_dim, 1).to(device)
         
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=3e-4)
-        self.critic_optimzer = optim.Adam(self.critic.parameters(), lr=1e-4)
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=1e-4)
+        self.critic_optimzer = optim.Adam(self.critic.parameters(), lr=2e-4)
         
         self.critic_lossfunc = nn.MSELoss()
     
@@ -239,7 +251,8 @@ class Agent:
                 # compute advantages, detach the val_pred from computational gragh
                 # advantages contain no gradient information
                 values = state_vals_pred.detach().clone()
-                tmp = rewards_tensor + gamma * self.critic(next_states_tensor).detach().reshape(rewards_tensor.shape)
+                tmp = qvals
+                # tmp = rewards_tensor + gamma * self.critic(next_states_tensor).detach().reshape(rewards_tensor.shape)
                 advantages = tmp - values.reshape(rewards_tensor.shape)
     
             else:
@@ -301,7 +314,7 @@ if __name__ == '__main__':
     agent = Agent(obs_shape[0], act_shape[0])
 
     buffer = ReplayBuffer()
-    res = train(env, agent, buffer, Ns=1, render=bool(0), max_episode=int(5e3), max_eplen=200, use_advatage=bool(1))
+    res = train(env, agent, buffer, Ns=5, render=bool(0), max_episode=int(5e3), max_eplen=200, use_advatage=bool(1))
 
     import matplotlib.pyplot as plt
     plt.figure(2)

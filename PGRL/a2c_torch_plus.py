@@ -1,4 +1,4 @@
-"""PPO-clip"""
+"""A2C"""
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -218,10 +218,6 @@ class Agent:
         self.mini_batch_size = args.mini_batch_size
         self.max_train_steps = args.max_train_steps
 
-        self.K_epochs = 5
-        self.epsilon = 0.2
-        self.entropy_coef = 0.02
-
         self.actor = Actor(self.obs_dim, self.act_dim, args.max_action).to(device)
         self.critic = Critic(self.obs_dim, 1).to(device)
 
@@ -301,26 +297,13 @@ class Agent:
             advantages = tmp - values.reshape(tmp.shape)
         # advantage normalization
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-5)
-
-        # Optimize policy for K epochs:
-        for _ in range(self.K_epochs):
-            for index in BatchSampler(SubsetRandomSampler(range(buffer.buffer_size)), self.mini_batch_size, True):
-                # this is for constructing the computational gragh
-                actions_dist = self.actor(states_tensor[index])
-                logprobs_new_tensor = actions_dist.log_prob(actions_tensor[index])
-                ratios = torch.exp(logprobs_new_tensor - logprobs_old_tensor[index])  # shape(mini_batch_size by 1)
-                # Only calculate the gradient of 'logprobs_new' in ratios
-                surr1 = ratios * advantages[index]  
-                surr2 = torch.clamp(ratios, 1 - self.epsilon, 1 + self.epsilon) * advantages[index]
-                dist_entropy = actions_dist.entropy()  # shape(mini_batch_size X 1)
-                actor_loss = -torch.min(surr1, surr2) - self.entropy_coef * dist_entropy  # Trick 5: policy entropy
-                # Update actor
-                self.actor_optimizer.zero_grad()
-                actor_loss.mean().backward()
-                torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
-                self.actor_optimizer.step()
-                # self.update_actor(advantages[index], logprobs_new_tensor, logprobs_old_tensor[index])
-                critic_loss = self.update_critic(qvals[index], states_tensor[index])
+        
+        for index in BatchSampler(SubsetRandomSampler(range(buffer.buffer_size)), self.mini_batch_size, True):
+            # this is for constructing the computational gragh
+            actions_dist = self.actor(states_tensor[index])
+            logprobs_new_tensor = actions_dist.log_prob(actions_tensor[index])
+            self.update_actor(advantages[index], logprobs_new_tensor, logprobs_old_tensor[index])
+            critic_loss = self.update_critic(qvals[index], states_tensor[index])
 
         self.lr_decay(train_step)
         return critic_loss
@@ -333,7 +316,7 @@ class Agent:
         for p in self.critic_optimzer.param_groups:
             p['lr'] = lr_c_now
 
-def evaluate_policy(env: gym.Env, agent: Agent, render: bool = False):
+def evaluate_policy(env: gym.Env, agent: Agent):
     times = 3
     evaluate_reward = 0
     for i in range(times):
@@ -343,7 +326,7 @@ def evaluate_policy(env: gym.Env, agent: Agent, render: bool = False):
         while not done:
             action = agent.evaluate(s)  # We use the deterministic policy during the evaluating
             s_, r, done, _, _ = env.step(action)
-            if i == times-1 and render:
+            if i == times-1:
                 env.render()
             episode_reward += r
             s = s_
@@ -369,11 +352,9 @@ def train(env: gym.Env, agent: Agent, buffer: ReplayBuffer, render=False, max_tr
         if train_step % 5 == 0:
             print(f'+----------Train Step: {train_step} (Buffer Steps: {buffer.buffer_size}) ----------+')
             print(f'Last Ave. Batch Reward: {episode_reward} || Ave. Reward: {smooth_episode_reward}')
-            # if train_step % 20 == 0:
-            #     evaluated_reward = evaluate_policy(env, agent)
-            #     print(f'Evaluated Reward: {evaluated_reward}')
-                # if evaluated_reward > 1000:
-                #     break
+            if train_step % 20 == 0:
+                evaluated_reward = evaluate_policy(env, agent)
+                print(f'Evaluated Reward: {evaluated_reward}')
             print('+-------------------------------------------------------------------------------+')
         buffer.clear()
     return res
@@ -389,11 +370,11 @@ def parse_args(env: gym.Env):
                                       help="max action")
     parser.add_argument("--mini_batch_size", type=int, default=100,
                                       help="mini_batch_size")
-    parser.add_argument("--buffer_capacity", type=int, default=2048,
+    parser.add_argument("--buffer_capacity", type=int, default=1500,
                                       help="buffer_capacity")
     parser.add_argument("--render", type=bool, default=False,
                                     help="render or not")
-    parser.add_argument("--max_train_steps", type=int, default=1000,
+    parser.add_argument("--max_train_steps", type=int, default=500,
                                     help="max training epoch")
                                     
 
@@ -401,9 +382,6 @@ def parse_args(env: gym.Env):
                                   help="actor learning rate")
     parser.add_argument("--lr_c", type=float, default=2e-4,
                                   help="crtic learning rate")
-    
-    parser.add_argument("--evaluate_policy", type=bool, default=False,
-                                  help="evaluate_policy or not")
     args = parser.parse_args()
     return args
 
