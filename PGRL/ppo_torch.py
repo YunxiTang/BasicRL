@@ -8,8 +8,11 @@ import numpy as np
 import gym
 import random, os
 import argparse
+import time
+from logger import Logger
+from collections import OrderedDict
 
-def orthogonal_init(layer, gain=1.0):
+def orthogonal_init(layer, gain=np.sqrt(2.)):
     nn.init.orthogonal_(layer.weight, gain=gain)
     nn.init.constant_(layer.bias, 0)
 
@@ -170,7 +173,7 @@ def compute_rtg(rewards, dones, discount_factor):
     return np.array(rtgs)
 
 class Actor(nn.Module):
-    def __init__(self, obs_dim, act_dim, max_action, hidden_dim=64):
+    def __init__(self, obs_dim, act_dim, max_action, hidden_dim=128):
         super(Actor, self).__init__()
         self.max_action = from_numpy(max_action)
         self.mean_net = nn.Sequential(nn.Linear(obs_dim, hidden_dim), nn.Tanh(),
@@ -185,8 +188,8 @@ class Actor(nn.Module):
         batched_mean = self.mean_net(x)
         batched_mean = batched_mean * self.max_action
         batch_dim = batched_mean.shape[0]
-        std = torch.clamp(self.std, -2., 5.)
-        single_scale_tril = torch.diag(std.exp())
+        # std = torch.clamp(self.std, -2., 5.)
+        single_scale_tril = torch.diag(self.std.exp())
         batched_std = single_scale_tril.repeat(batch_dim, 1, 1)
         return distributions.MultivariateNormal(batched_mean, scale_tril=batched_std)
 
@@ -195,7 +198,7 @@ class Actor(nn.Module):
         return self.mean_net(x)
 
 class Critic(nn.Module):
-    def __init__(self, obs_dim, value_dim, hidden_dim=64):
+    def __init__(self, obs_dim, value_dim, hidden_dim=128):
         super(Critic, self).__init__()
         assert value_dim == 1, 'output dim of critic net can only be 1'
         self.value_net = nn.Sequential(nn.Linear(obs_dim, hidden_dim), nn.Tanh(),
@@ -299,12 +302,15 @@ class Agent:
 
         rtgs = compute_rtg(rewards_np, dones_np, gamma)
         qvals = from_numpy( rtgs )
+        qvals_mean = qvals.mean()
+        qvals_std = qvals.std()
+        qvals_centered = (qvals - qvals_mean) / (qvals_std + 1e-5)
 
         # compute advantages
         # advantages contain no gradient information
         with torch.no_grad():
-            values = self.critic(states_tensor).squeeze()
-            next_values = self.critic(next_states_tensor).squeeze()
+            values = self.critic(states_tensor).squeeze() * (qvals_std + 1e-5) + qvals_mean
+            next_values = self.critic(next_states_tensor).squeeze() * (qvals_std + 1e-5) + qvals_mean
             # print(rewards_tensor.shape, values.shape, next_values.shape)
             if args.gae:
                 """use generalized advantage estimation"""
@@ -320,15 +326,18 @@ class Agent:
 
         # optimize policy via ppo-clip
         for _ in range(self.K_epochs):
+            L_critic = []
             for index in BatchSampler(SubsetRandomSampler(range(buffer.buffer_size)), self.mini_batch_size, False):
                 # this is for constructing the computational gragh
                 actions_dist = self.actor(states_tensor[index])
                 logprobs_new_tensor = actions_dist.log_prob(actions_tensor[index])
                 self.update_actor(advantages[index], actions_dist, logprobs_new_tensor, logprobs_old_tensor[index])
-                critic_loss = self.update_critic(qvals[index], states_tensor[index])
+                critic_loss = self.update_critic(qvals_centered[index], states_tensor[index])
+                L_critic.append(critic_loss)
 
-        self.lr_decay(train_step)
-        return critic_loss
+        log_info = OrderedDict()
+        log_info['critic loss'] = np.mean( L_critic )
+        return log_info
     
     def lr_decay(self, train_step):
         lr_a_now = self.lr_a * (1 - train_step / self.max_train_steps)
@@ -355,23 +364,24 @@ def evaluate_policy(env: gym.Env, agent: Agent, max_episode_step, render: bool =
             if done:
                 break
         evaluate_reward += episode_reward
-
     return evaluate_reward / times
 
     
-def train(env: gym.Env, agent: Agent, buffer: ReplayBuffer, args):
+def train(env: gym.Env, agent: Agent, buffer: ReplayBuffer, args, exp_logger: Logger):
     """training"""
-    res = []
     for train_step in range(args.max_train_steps):
         episode_reward = buffer.sample_rollouts(agent, env, max_eplen=args.max_episode_steps, render=args.render)
-                
+        
         if train_step == 0:
             smooth_episode_reward = episode_reward
         else:
             smooth_episode_reward = 0.95 * smooth_episode_reward + 0.05 * episode_reward
 
-        res.append(smooth_episode_reward)
-        agent.update(buffer, args.gamma, train_step)
+        log_info = agent.update(buffer, args.gamma, train_step)
+        agent.lr_decay(train_step)
+        # loggings
+        exp_logger.log_scalar(episode_reward, "Train_AverageReturn", train_step)
+        exp_logger.log_scalar(log_info['critic loss'], 'Train_CriticLoss', train_step)
         
         if train_step % 5 == 0:
             print(f'+----------Train Iter.: {train_step} (Buffer Steps: {buffer.buffer_size}) ----------+')
@@ -381,7 +391,7 @@ def train(env: gym.Env, agent: Agent, buffer: ReplayBuffer, args):
                 print(f'Evaluated Reward: {evaluated_reward}')
             print('+-------------------------------------------------------------------------------+\n')
         buffer.clear()
-    return res
+    return None
 
 
 def parse_args(env: gym.Env):
@@ -401,7 +411,7 @@ def parse_args(env: gym.Env):
     parser.add_argument("--max_episode_steps", type=int, default=1000,
                                     help="max episode length")
     
-    parser.add_argument("--max_train_steps", type=int, default=100,
+    parser.add_argument("--max_train_steps", type=int, default=2000,
                                     help="max training epoch")
 
     parser.add_argument("--gae", type=bool, default=True,
@@ -412,9 +422,9 @@ def parse_args(env: gym.Env):
                                     help="discount factor")
     parser.add_argument("--K_epochs", type=int, default=5,
                                     help="PPO inner update steps")
-    parser.add_argument("--lr_a", type=float, default=5e-4,
+    parser.add_argument("--lr_a", type=float, default=2e-4,
                                   help="actor learning rate")
-    parser.add_argument("--lr_c", type=float, default=5e-4,
+    parser.add_argument("--lr_c", type=float, default=2e-4,
                                   help="crtic learning rate")
     
     parser.add_argument("--render", type=bool, default=False,
@@ -428,7 +438,9 @@ def parse_args(env: gym.Env):
 if __name__ == '__main__':
     np.set_printoptions(precision=3, suppress=True)
     
-    env_platforms = ['InvertedDoublePendulum-v4', 'HumanoidStandup-v4', 'Walker2d-v4']
+    env_platforms = ['InvertedDoublePendulum-v4', 
+                     'HumanoidStandup-v4', 
+                     'Walker2d-v4']
     idx = 0
     env = gym.make(env_platforms[idx], new_step_api=True)
     set_seeds(env, seed=10086)
@@ -436,11 +448,18 @@ if __name__ == '__main__':
     args = parse_args(env)
     agent = Agent(args)
     buffer = ReplayBuffer(args)
+ 
+    data_path = os.path.dirname(os.path.realpath(__file__)) + '\data'
 
-    res = train(env, agent, buffer, args)
+    if not (os.path.exists(data_path)):
+        os.makedirs(data_path)
+    print(data_path)
+    logdir_prefix = 'tyx' 
+    logdir = logdir_prefix + '_' + env_platforms[idx] + '_' + time.strftime("%d-%m-%Y_%H-%M-%S")
+    logdir = os.path.join(data_path, logdir)
+    if not(os.path.exists(logdir)):
+        os.makedirs(logdir)
 
-    import matplotlib.pyplot as plt
-    plt.figure(2)
-    plt.plot(res, 'k-')
-    plt.show()
+    exp_logger = Logger(logdir)
+    train(env, agent, buffer, args, exp_logger)
     
