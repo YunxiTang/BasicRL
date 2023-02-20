@@ -195,7 +195,7 @@ class Actor(nn.Module):
 
     def get_mean_action(self, x):
         """for policy evaluation"""
-        return self.mean_net(x)
+        return self.mean_net(x) * self.max_action
 
 class Critic(nn.Module):
     def __init__(self, obs_dim, value_dim, hidden_dim=128):

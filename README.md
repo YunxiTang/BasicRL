@@ -1,2 +1,2 @@
 # BasicRL
-Basic RL 
+Basic Implementation of Reinforcement Learning Algorithms 

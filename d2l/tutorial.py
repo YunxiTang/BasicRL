@@ -1,3 +1,7 @@
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+
 import matplotlib.pyplot as plt
 import torch
 import numpy as np
@@ -419,6 +423,7 @@ def run_part6():
          [0.8, 1.]]
     )
     gaussian = distributions.MultivariateNormal(mean, cov)
+    gaussian.entropy()
     print(gaussian.sample((1,)))
     samples = gaussian.sample((500,))
     plt.gca().set_aspect("equal")
