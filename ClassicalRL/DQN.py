@@ -1,4 +1,4 @@
-"""Deep Q Learning"""
+"""Deep Q Net Learning"""
 import random, os, sys
 import torch
 import torch.nn as nn
@@ -75,6 +75,7 @@ class Agent_DQN:
         self._epsilon = epsilon
         self._target_update = target_update
         self._device = device
+        self._TAU = 0.005
 
         self.q_net = QCritic(
             self._state_dim, 
@@ -121,7 +122,9 @@ class Agent_DQN:
         q_values = self.q_net(states).gather(1, actions)  
 
         # max Q on next state
-        max_next_q_values = self.target_q_net(next_states).max(dim=1)[0].view(-1, 1)
+        with torch.no_grad():
+            max_next_q_values = self.target_q_net(next_states).max(dim=1)[0].view(-1, 1)
+
         # TD target
         q_targets = rewards + self._gamma * max_next_q_values * (1 - dones) 
 
@@ -132,8 +135,15 @@ class Agent_DQN:
         self.q_optimizer.step()
 
         if self._count % self._target_update == 0:
-            # update the target Q network
-            self.target_q_net.load_state_dict(self.q_net.state_dict())  
+            # soft update of the target Q network
+            target_q_net_state_dict = self.target_q_net.state_dict()
+            q_net_state_dict = self.q_net.state_dict()
+            for key in q_net_state_dict:
+                target_q_net_state_dict[key] = q_net_state_dict[key] * self._TAU + target_q_net_state_dict[key] * (1-self._TAU)
+                self.target_q_net.load_state_dict(target_q_net_state_dict)
+            
+            # hard update of the target Q network
+            # self.target_q_net.load_state_dict(self.q_net.state_dict())  
 
         self._count += 1 
 
@@ -152,7 +162,7 @@ if __name__ == '__main__':
     batch_size = 64
     
 
-    env_name = 'CartPole-v0'
+    env_name = 'CartPole-v1'
     env = gym.make(env_name)
     random.seed(0)
     np.random.seed(0)
@@ -172,7 +182,7 @@ if __name__ == '__main__':
     )
 
     return_list = []
-    for i in range(10):
+    for i in range(50):
         with tqdm(total=int(num_episodes / 10), desc='Iteration %d' % i) as pbar:
             for i_episode in range(int(num_episodes / 10)):
                 episode_return = 0
