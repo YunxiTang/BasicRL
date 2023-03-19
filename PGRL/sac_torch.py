@@ -230,7 +230,7 @@ class Agent:
         current_Q1, current_Q2 = self.critic(batch_s, batch_a)
  
         with torch.no_grad():
-            # a_ from the current policy
+            # a_ from the current policy 
             batch_a_, log_pi_ = self.select_action(batch_s_)  
             # Compute target Q
             target_Q1, target_Q2 = self.critic_target(batch_s_, batch_a_)

@@ -350,7 +350,8 @@ class PETS:
         return_list.append(explore_return)
 
         for i_episode in range(self.num_episodes - 1):
-            self.train_model()
+            if i_episode % 5 == 0:
+                self.train_model()
             episode_return = self.mpc()
             return_list.append(episode_return)
             print('episode: %d, return: %d' % (i_episode + 2, episode_return))
@@ -358,11 +359,11 @@ class PETS:
 
 
 if __name__ == '__main__':
-    buffer_size = 100000
-    n_sequence = 50
-    elite_ratio = 0.4
-    plan_horizon = 10
-    num_episodes = 1000
+    buffer_size = 10000
+    n_sequence = 200
+    elite_ratio = 0.3
+    plan_horizon = 4
+    num_episodes = 100
     
     env_platforms = ['InvertedDoublePendulum-v4', 
                      'HumanoidStandup-v4', 
@@ -371,7 +372,11 @@ if __name__ == '__main__':
     env = gym.make(env_platforms[idx], new_step_api=True)
 
     replay_buffer = ReplayBuffer(buffer_size)
-    pets = PETS(env, replay_buffer, n_sequence, elite_ratio, plan_horizon,
+    pets = PETS(env, 
+                replay_buffer, 
+                n_sequence, 
+                elite_ratio, 
+                plan_horizon,
                 num_episodes)
     return_list = pets.train()
 
