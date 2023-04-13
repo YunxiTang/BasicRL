@@ -22,7 +22,7 @@ class Encoder(nn.Module):
             nn.Linear(128, 64), nn.ReLU(),
             nn.Linear(64, 36), nn.ReLU(),
             nn.Linear(36, 18), nn.ReLU(),
-            nn.Linear(18, 9)
+            nn.Linear(18, 9), nn.Softmax()
         )
 
     def forward(self, x):
