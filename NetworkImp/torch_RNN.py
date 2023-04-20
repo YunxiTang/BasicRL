@@ -1,14 +1,29 @@
 """RNN with Pytorch"""
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils import data
 import numpy as np
 import os
 import matplotlib.pyplot as plt
+import hydra
+import pdb
 
-current_path = os.path.dirname(__file__)
+device = torch.device('cpu')
+
+def grad_clipping(net, theta):
+    """
+        gradient clipping
+    """
+    if isinstance(net, nn.Module):
+        params = [p for p in net.parameters() if p.requires_grad]
+    else:
+        params = net.params
+    norm = torch.sqrt(sum(torch.sum((p.grad ** 2)) for p in params))
+    if norm > theta:
+        for param in params:
+            param.grad[:] *= theta / norm
+
 
 class CustomDataSet(data.Dataset):
     def __init__(self, xs, ys):
@@ -17,140 +32,17 @@ class CustomDataSet(data.Dataset):
         self._ys = ys[:,None]
 
     def __getitem__(self, index):
-        return (self._xs[index:index+5], self._ys[index+5])
+        return (self._ys[index:index+5], self._ys[index+5])
     
     def __len__(self):
         return self._xs.shape[0]-10
-    
-def test_single_layer_rnn():
-    # network parameters
-    # dim of x_{t}
-    input_size = 10
-    # dim of h_{t-1}
-    hidden_size = 10
-    # number of rnn layers
-    num_layers = 1
-
-    # data parameters
-    # sequence length
-    seq_len = 5
-    # bactch size
-    batch_size = 3
-    # 
-    data_dim = input_size
-
-    # a data sample
-    data_sample = torch.randn(seq_len, batch_size, data_dim)
-
-    # official RNN
-    o_rnn = nn.RNN(data_dim, hidden_size, num_layers)
-
-    # init hidden state
-    h0 = torch.randn(num_layers, batch_size, hidden_size)
-
-    class CustomRNN:
-        """
-            Single Layer RNN
-        """
-        def __init__(self, input_size, seq_len, num_layer):
-            self.input_size = input_size
-            self.num_layer = num_layer
-            self.seq_len = seq_len
-            self.W_ih = torch.nn.Parameter(o_rnn.weight_ih_l0.T)
-            self.b_ih = torch.nn.Parameter(o_rnn.bias_ih_l0)
-            self.W_hh = torch.nn.Parameter(o_rnn.weight_hh_l0.T)
-            self.b_hh = torch.nn.Parameter(o_rnn.bias_hh_l0)
-            self.ht = torch.nn.Parameter(h0)
-            self.myoutput = []
-
-        def forward(self, x):
-            for i in range(self.seq_len):
-                igates = torch.matmul(x[i], self.W_ih) + self.b_ih
-                hgates = torch.matmul(self.ht, self.W_hh) + self.b_hh
-                self.ht = torch.tanh(igates + hgates)
-                self.myoutput.append(self.ht)
-            return self.ht, self.myoutput
-        
-    m_rnn = CustomRNN(input_size, seq_len, num_layers)
-    myht, myoutput = m_rnn.forward(data_sample)
-    official_output, official_hn = o_rnn(data_sample, h0)
-    
-
-def test_two_layer_rnn():
-    #network parameters
-    input_size = 10
-    hidden_size = 20
-    num_layers = 2
-
-    #data parameters
-    seq_len = 5
-    batch_size = 3
-    data_dim = input_size
-
-    data_sample = torch.randn(seq_len, batch_size, data_dim)
-
-    #original official rnn in pytorch
-    o_rnn = nn.RNN(input_size, hidden_size, num_layers)
-    h0 = torch.randn(num_layers, batch_size, hidden_size)
-
-    class CustomRNN2:
-        def __init__(self):
-            self.W_ih_l0 = torch.nn.Parameter(o_rnn.weight_ih_l0.T)
-            self.b_ih_l0 = torch.nn.Parameter(o_rnn.bias_ih_l0)
-            self.W_hh_l0 = torch.nn.Parameter(o_rnn.weight_hh_l0.T)
-            self.b_hh_l0 = torch.nn.Parameter(o_rnn.bias_hh_l0)
-            
-            self.W_ih_l1 = torch.nn.Parameter(o_rnn.weight_ih_l1.T)
-            self.b_ih_l1 = torch.nn.Parameter(o_rnn.bias_ih_l1)
-            self.W_hh_l1 = torch.nn.Parameter(o_rnn.weight_hh_l1.T)
-            self.b_hh_l1 = torch.nn.Parameter(o_rnn.bias_hh_l1)
-            
-            self.ht0 = torch.nn.Parameter(h0[0])
-            self.ht1 = torch.nn.Parameter(h0[1])
-            
-            self.myoutput = []
-            
-        def forward(self, x):
-            """forward
-
-            Args:
-                x (torch.tensor): input with shape of (seq_len, batch_size, data_dim)
-            """
-            for i in range(x.shape[0]):
-                # First layer
-                igates_l0 = torch.mm(x[i], self.W_ih_l0) + self.b_ih_l0
-                hgates_l0 = torch.mm(self.ht0, self.W_hh_l0) + self.b_hh_l0
-                self.ht0 = torch.tanh(igates_l0 + hgates_l0)
-                
-                # second layer
-                igates_l1 = torch.mm(self.ht0, self.W_ih_l1) + self.b_ih_l1
-                hgates_l1 = torch.mm(self.ht1, self.W_hh_l1) + self.b_hh_l1
-                self.ht1 = torch.tanh(igates_l1 + hgates_l1)
-                ht_final_layer = [self.ht0, self.ht1]
-                self.myoutput.append(self.ht1)
-            return self.myoutput, ht_final_layer
-        
-    myrnn = CustomRNN2()
-    myoutput, myht = myrnn.forward(data_sample)
-    official_output, official_hn = o_rnn(data_sample, h0)
-
-    print ('myht:')
-    print (myht[0])
-    print ('official_hn:')
-    print (official_hn[0])
-
-    print ("--" * 40)
-    print ('myoutput:')
-    print (myoutput[2])
-    print ('official_output')
-    print(official_output[2])
 
 
-"""
-    practical usage of RNN
-"""
 class MyRNNCell(nn.Module):
     def __init__(self, input_size:int, hidden_size:int, bias:bool = True, nonlinearity:str = 'tanh'):
+        """
+            single step of a single layer rnn
+        """
         super(MyRNNCell, self).__init__()
         self.input_trans = nn.Linear(input_size, hidden_size, bias=bias)
         self.hidden_trans = nn.Linear(hidden_size, hidden_size, bias=bias)
@@ -164,7 +56,7 @@ class MyRNNCell(nn.Module):
         """
             forward pass of single RNN time step
             x: input of RNNCell: (batch_size, input_size)
-            h: hidden variable: (batch_size, hidden_size)
+            h: hidden variable:  (batch_size, hidden_size)
         """
         igate = self.input_trans(x)
         hgate = self.hidden_trans(h)
@@ -176,12 +68,14 @@ class MyRNN(nn.Module):
     def __init__(self, 
                 input_size:int, 
                 hidden_size:int, 
+                output_size:int,
                 batch_first:bool = False, 
                 num_layers:int = 1,
                 nonlinearity: str = 'tanh',
                 bias: bool = True, 
                 dropout: float = 0):
-        """My RNN
+        """
+        My RNN module (inefficient)
 
         Args:
             input_size (int): input size 
@@ -198,26 +92,32 @@ class MyRNN(nn.Module):
         self.batch_first = batch_first
         
         # support multi-layer
-        self.cells = nn.ModuleList([MyRNNCell(input_size, hidden_size, bias, nonlinearity) for _ in range(num_layers)])
+        self.cells = nn.ModuleList([MyRNNCell(input_size, hidden_size, bias, nonlinearity)] + [MyRNNCell(hidden_size, hidden_size, bias, nonlinearity) for _ in range(num_layers-1)])
+        self.fc = nn.Linear(hidden_size, output_size)
         self.dropout = dropout
         if dropout:
             # Dropout layer
             self.dropout_layer = nn.Dropout(dropout)
             
-    def forward(self, input:torch.Tensor, h_0:torch.Tensor):
-        """forward pass of rnn module
+    def init_hidden_state(self, batch_size, device):
+        h = torch.zeros((self.num_layers, batch_size, self.hidden_size), device=device, dtype=torch.float32)
+        return h
+            
+    def forward(self, input:torch.Tensor):
+        """
+            forward pass of rnn module
 
         Args:
-            input (torch.Tensor): shape: [n_steps, batch_size, input_size] if batch_first=False
-            h_0 (torch.Tensor): shape:   [num_layers, batch_size, hidden_size]
+            input (torch.Tensor): shape: [n_steps, batch_size, input_size] if batch_first is False
         """
-        is_batched = (input.ndim == 3)
-        batch_dim = 0 if self.batch_first else 1
-        if not is_batched:
-            # convert into batched data
-            input = input.unsqueeze(batch_dim)
-            if h_0 is not None:
-                h_0 = h_0.unsqueeze(1)
+        if self.batch_first:
+            batch_dim = 0
+        else:
+            batch_dim = 1
+        
+        if input.ndim != 3:
+            # convert into batched form
+            input = input.unsqueeze(dim=batch_dim)
             
         if self.batch_first:
             batch_size, n_steps, _ = input.shape
@@ -226,54 +126,93 @@ class MyRNN(nn.Module):
         else:
             n_steps, batch_size, _ = input.shape
         
-        if h_0 is None:
-            h = [torch.zeros((batch_size, self.hidden_size), device=input.device, dtype=torch.float32) for _ in range(self.num_layers)]
-        else:
-            h = h_0
-            h = list(torch.unbind(h)) 
-       
+        h = self.init_hidden_state(batch_size, input.device)
         output = []
         
         for t in range(n_steps):
+            hs = []
             inp = input[t]
             for layer in range(self.num_layers):
-                h[layer] = self.cells[layer](inp, h[layer])
-                inp = h[layer]
+                hidden_s = self.cells[layer](inp, h[layer])
+                hs.append(hidden_s)
+                inp = hidden_s
                 if self.dropout and layer != self.num_layers-1:
                     inp = self.dropout_layer(inp)
-            
-            output.append(10.*h[-1])
+            h = torch.stack(hs)
+            output.append(h[-1])
         
-        output = torch.stack(output)
+        output = torch.stack(output) # [seq_len, batch_size, input_size]
+        
         if self.batch_first:
-            output = output.permute(1, 0, 2)
-        h_n = torch.stack(h)
-        return output, h_n
+            output = output.permute(1, 0, 2) # [batch_size, seq_len, input_size]
+            
+        pred = self.fc( output[:, -1, :] )
+        
+        return pred, h
+
+
+class RNN(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, num_classes):
+        super(RNN, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, num_classes)
+    
+    def forward(self, x):
+        # Set initial hidden and cell states 
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(device) 
+        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(device)
+        
+        # Forward propagate LSTM
+        out, h = self.lstm(x, (h0, c0))  # out: tensor of shape (batch_size, seq_length, hidden_size)
+        
+        # Decode the hidden state of the last time step
+        out = self.fc(out[:, -1, :])
+        return out, h
+
 
 if __name__ == '__main__':
     np.set_printoptions(suppress=True)
+    
     xs = np.linspace(0, 10, 10000, dtype=np.float32)
     ys = np.sin(2 * xs) + 0.2 * xs + np.random.normal(0., 0.05, (10000,)).astype(np.float32)
     dataset = CustomDataSet(xs, ys)
-    data_iter = data.DataLoader(dataset, 100, False, drop_last=True)
+    data_iter = data.DataLoader(dataset, 50, False, drop_last=True)
     loss_func = nn.MSELoss()
-    model = MyRNN(input_size=1, hidden_size=1, num_layers=3, batch_first=True)
+    model = RNN(1, 32, 3, 1)
+    # model = MyRNN(input_size=1, hidden_size=32, output_size=1, num_layers=3, nonlinearity='relu', batch_first=True, dropout=0.5)
     optimizer = optim.Adam(model.parameters(), 1e-3)
-    hn = None
-    for iter in range(40):
+    
+    for iter in range(10):
         Loss = 0.0
         for feat, label in data_iter:
-            output, hn = model(feat, hn)
-            hn = hn.detach()
-            # print(output.shape) (batch_size, seq_len, input_dim)
-            pred = output[:,-1,:]
+            pred, _ = model(feat)
             loss = loss_func(pred, label)
             optimizer.zero_grad()
             loss.backward()
+            grad_clipping(model, 1.0)
             optimizer.step()
             Loss += loss.detach().numpy()
             
-        print(f'Iter: {iter} || Loss: {Loss}')  
-    
-    
-    
+        if iter % 20 == 0: 
+            print(f'Iter: {iter} || Loss: {Loss}')  
+    # breakpoint() # for debugging
+    # =================== model evaluation ====================
+    model.eval()
+    x_help = np.linspace(8, 18, 10000, dtype=np.float32)
+    y_help = np.sin(2 * x_help) + 0.2 * x_help
+    y_true = []
+    y_eval = [y_help[0:5]]
+
+    for i in range(9990):
+        with torch.no_grad():
+            feat = torch.tensor( y_eval[i:i+5] )
+            y_predict, _ = model(feat[None,:,None])
+            y_true.append(y_help[i+5])
+            y_eval.append(y_predict.squeeze().numpy())
+        
+    plt.figure()
+    plt.plot(y_true, 'r-.')
+    plt.plot(y_eval)
+    plt.show()

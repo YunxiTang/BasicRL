@@ -1,5 +1,6 @@
 """Linear Regression with pytorch"""
-
+import hydra
+from omegaconf import DictConfig, OmegaConf
 import torch
 import torch.nn as nn
 import torch.functional as F
@@ -29,7 +30,7 @@ def low_api_run():
     
     def loss(y_hat, y):
         return torch.mean( (y_hat - y.reshape(y_hat.shape)) ** 2 / 2. )
-
+    cfg = OmegaConf.load(r'Config\torch_LR.yaml')
     w_true = torch.tensor([1.5,])
     b_true = torch.tensor([1.2,])
     x, y = data_generation(w_true, b_true, 2000)
@@ -38,7 +39,7 @@ def low_api_run():
     # w = torch.zeros((1,1), requires_grad=True)
     b = torch.zeros(1, requires_grad=True)
 
-    batch_size = 100
+    batch_size = cfg.batch_size
     lr = 0.03
 
     for epoch in range(50):
@@ -60,14 +61,15 @@ def low_api_run():
     plt.show()
     return ptu.to_numpy(l)
     
-def high_api_run():
+@hydra.main(config_path='Config', config_name='torch_LR', version_base=None)
+def high_api_run(config):
     # data generation
     w_true = torch.tensor([1.5,])
     b_true = torch.tensor([1.2,])
     x, y = data_generation(w_true, b_true, 2000)
 
-    batch_size = 100
-    lr = 0.03
+    batch_size = config.batch_size
+    lr = config.lr
 
     # build a model and initialization
     prediction = nn.Sequential( nn.Linear(1, 1) )
@@ -102,4 +104,4 @@ def high_api_run():
 if __name__ == '__main__':
     final_loss1 = low_api_run()
     final_loss2 = high_api_run()
-    print(final_loss1, final_loss2 / 2)
+    # print(final_loss1, final_loss2 / 2)
