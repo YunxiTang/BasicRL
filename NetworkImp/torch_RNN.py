@@ -159,10 +159,14 @@ class RNN(nn.Module):
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
         self.fc = nn.Linear(hidden_size, num_classes)
     
-    def forward(self, x):
-        # Set initial hidden and cell states 
+    def init_hidden_state(self, x):
         h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(device) 
         c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(device)
+        return h0, c0
+    
+    def forward(self, x):
+        # Set initial hidden and cell states 
+        h0, c0 = self.init_hidden_state(x)
         
         # Forward propagate LSTM
         out, h = self.lstm(x, (h0, c0))  # out: tensor of shape (batch_size, seq_length, hidden_size)
@@ -176,7 +180,7 @@ if __name__ == '__main__':
     np.set_printoptions(suppress=True)
     
     xs = np.linspace(0, 10, 10000, dtype=np.float32)
-    ys = np.sin(2 * xs) + 0.2 * xs + np.random.normal(0., 0.05, (10000,)).astype(np.float32)
+    ys = np.sin(2 * xs) + 0.2 * np.cos(2 * xs) + np.random.normal(0., 0.05, (10000,)).astype(np.float32)
     dataset = CustomDataSet(xs, ys)
     data_iter = data.DataLoader(dataset, 50, False, drop_last=True)
     loss_func = nn.MSELoss()
@@ -184,7 +188,7 @@ if __name__ == '__main__':
     # model = MyRNN(input_size=1, hidden_size=32, output_size=1, num_layers=3, nonlinearity='relu', batch_first=True, dropout=0.5)
     optimizer = optim.Adam(model.parameters(), 1e-3)
     
-    for iter in range(10):
+    for iter in range(100):
         Loss = 0.0
         for feat, label in data_iter:
             pred, _ = model(feat)
@@ -195,22 +199,22 @@ if __name__ == '__main__':
             optimizer.step()
             Loss += loss.detach().numpy()
             
-        if iter % 20 == 0: 
+        if iter % 5 == 0: 
             print(f'Iter: {iter} || Loss: {Loss}')  
     # breakpoint() # for debugging
     # =================== model evaluation ====================
     model.eval()
-    x_help = np.linspace(8, 18, 10000, dtype=np.float32)
-    y_help = np.sin(2 * x_help) + 0.2 * x_help
+    x_help = np.linspace(4, 8, 10000, dtype=np.float32)
+    y_help = np.sin(2 * x_help) + + 0.2 * np.cos(2 * x_help)
     y_true = []
-    y_eval = [y_help[0:5]]
+    y_eval = y_help.copy()
 
     for i in range(9990):
         with torch.no_grad():
-            feat = torch.tensor( y_eval[i:i+5] )
+            feat = torch.tensor( np.array(y_help[i:i+5]) ).squeeze()
             y_predict, _ = model(feat[None,:,None])
             y_true.append(y_help[i+5])
-            y_eval.append(y_predict.squeeze().numpy())
+            y_eval[i+5]=y_predict.squeeze().numpy()
         
     plt.figure()
     plt.plot(y_true, 'r-.')

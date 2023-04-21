@@ -15,6 +15,8 @@ class MyTransformer(nn.Module):
         self.output_size = output_size
         self.num_seq = num_seq
         
+        self.encoder_layer = nn.TransformerEncoderLayer()
+        
     def encoder(self, x):
         """encoder
 
