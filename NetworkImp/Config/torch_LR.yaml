@@ -1,0 +1,3 @@
+### Configuration Settings
+batch_size: 100
+lr: 1e-3
