@@ -1,5 +1,5 @@
 import os
-import sys, time
+import time
 from typing import (Any, Sequence, Optional, Tuple, Iterator, Dict, Callable, Union)
 import json
 from tqdm.auto import tqdm
@@ -44,8 +44,8 @@ def create_data_loaders(*datasets : Sequence[data.Dataset],
     Args:
       datasets: Datasets for dataloader.
       train: Sequence indicating which datasets are used for
-            training and which not. If single bool, the same value
-            is used for all datasets.
+            training and which not. 
+            If single bool, the same value is used for all datasets.
       batch_size: Batch size to use in the data loaders.
       num_workers: Number of workers for each dataset.
       seed: Seed to initialize the workers and shuffling with.
@@ -95,7 +95,8 @@ class TrainerModule:
         self.exmp_input = exmp_input
         self.check_val_per_n_epoch = check_val_per_n_epoch
         
-        self.config = {
+        self.config = \
+        {
             'model_class': model_class.__name__,
             'model_hparams': model_hparams,
             'optimizer_hparams': optimizer_hparams,
@@ -106,16 +107,18 @@ class TrainerModule:
             'seed': self.seed
         }
         
-        # include extra parameters in config
+        self.state = None
+        
+        # include extra parameters into the config
         self.config.update(kwargs)
         
-        # Create empty model (contain no params)
+        # Create an empty model (contain no params)
         self.model = self.model_class(**self.model_hparams)
         
         # print model architechture
         self.print_tabulate(exmp_input)
         
-        # Init trainer parts
+        # Init the logger
         self.init_logger(logger_params)
         self.create_jitted_functions()
         self.init_model(exmp_input)
@@ -176,7 +179,7 @@ class TrainerModule:
         Args:
           exmp_input: An input to the model with which the shapes are inferred.
         """
-        print(self.model.tabulate(random.PRNGKey(0), *exmp_input, train=True))
+        print(self.model.tabulate(random.PRNGKey(0), *exmp_input, train=False))
         
         
     def run_model_init(self, exmp_input : Any, init_rng : Any) -> Dict:
@@ -190,7 +193,7 @@ class TrainerModule:
         Returns:
           The initialized variable dictionary.
         """
-        return self.model.init(init_rng, *exmp_input, train=True)
+        return self.model.init(init_rng, *exmp_input, train=False)
         
         
     def init_model(self, exmp_input : Any):
@@ -208,7 +211,8 @@ class TrainerModule:
         # Run model initialization
         variables = self.run_model_init(exmp_input, init_rng)
         
-        # Create default state. Optimizer is initialized later
+        # Create default train-state. 
+        # Optimizer will be initialized later
         self.state = TrainState(
             step=0,
             apply_fn=self.model.apply,
@@ -240,7 +244,7 @@ class TrainerModule:
             assert False, f'Unknown optimizer "{optimizer_name}"'
             
         # Initialize learning rate scheduler
-        # A cosine decay scheduler
+        # A cosine decay scheduler for default
         lr = hparams.pop('lr', 1e-3)
         warmup = hparams.pop('warmup', 0)
         
@@ -251,16 +255,19 @@ class TrainerModule:
             decay_steps=int(num_epochs * num_steps_per_epoch),
             end_value=0.01 * lr
         )
-        # Clip gradients at max value, and evt. apply weight decay
-        transf = [optax.clip_by_global_norm(hparams.pop('gradient_clip', 1.0))]
-        if opt_class == optax.sgd and 'weight_decay' in hparams:  # wd is integrated in adamw
-            transf.append(optax.add_decayed_weights(hparams.pop('weight_decay', 0.0)))
+        # clip gradients at max value, and evt. apply weight decay
+        gradient_trans = [
+            optax.clip_by_global_norm(hparams.pop('gradient_clip', 1.0))
+            ]
+        if opt_class == optax.sgd and 'weight_decay' in hparams:  
+            # wd is integrated in adamw
+            gradient_trans.append(optax.add_decayed_weights(hparams.pop('weight_decay', 0.0)))
             
         optimizer = optax.chain(
-            *transf,
+            *gradient_trans,
             opt_class(lr_schedule, **hparams)
         )
-        # Initialize training state
+        # add the initialized opt-related into training state
         self.state = TrainState.create(apply_fn=self.state.apply_fn,
                                        params=self.state.params,
                                        batch_stats=self.state.batch_stats,
@@ -284,12 +291,15 @@ class TrainerModule:
     def create_functions(self) -> Tuple[Callable[[TrainState, Any], Tuple[TrainState, Dict]],
                                         Callable[[TrainState, Any], Tuple[TrainState, Dict]]]:
         """
-        Creates and returns functions for the training and evaluation step. The
-        functions take as input the training state and a batch from the train/
-        val/test loader. Both functions are expected to return a dictionary of
-        logging metrics, and the training function a new train state. This
-        function needs to be overwritten by a subclass. The train_step and
-        eval_step functions here are examples for the signature of the functions.
+        Creates and returns functions for the training and evaluation step. 
+        The functions take as input, (train_state, batch) from the train/
+        val/test loader. 
+        '''train_step()''' should return a dictionary of logging metrics 
+        and a new train state.
+        '''eval_step()'''' should return a dictionary of logging metrics
+        '''create_functions''' needs to be overwritten by a subclass. 
+        The '''train_step''' and '''eval_step''' functions here are examples 
+        for the signature of the functions.
         """
         def train_step(state : TrainState, batch : Any):
             metrics = {}
@@ -324,6 +334,7 @@ class TrainerModule:
         self.on_training_start()
         
         best_eval_metrics = None
+        
         for epoch_idx in self.tracker(range(1, num_epochs+1), desc='Epochs'):
             train_metrics = self.train_epoch(train_loader)
             self.logger.log_metrics(train_metrics, step=epoch_idx)
@@ -353,7 +364,7 @@ class TrainerModule:
         
         # Close logger
         self.logger.finalize('success')
-        return best_eval_metrics
+        return best_eval_metrics, self.state
 
     def train_epoch(self,
                     train_loader : Iterator) -> Dict[str, Any]:
@@ -407,7 +418,8 @@ class TrainerModule:
     
     def is_new_model_better(self,
                             new_metrics : Dict[str, Any],
-                            old_metrics : Dict[str, Any]) -> bool:
+                            old_metrics : Dict[str, Any]
+                            ) -> bool:
         """
         Compares two sets of evaluation metrics to decide whether the
         new model is better than the previous ones or not.
@@ -432,16 +444,15 @@ class TrainerModule:
     
     def on_training_start(self):
         """
-        Method called before training is started. Can be used for additional
-        initialization operations etc.
+        Method called before training is started. 
+        Can be used for additional initialization operations etc.
         """
         pass
     
-    def on_training_epoch_end(self,
-                              epoch_idx : int):
+    def on_training_epoch_end(self, epoch_idx : int):
         """
-        Method called at the end of each training epoch. Can be used for additional
-        logging or similar.
+        Method called at the end of each training epoch. 
+        Can be used for additional logging or similar.
 
         Args:
           epoch_idx: Index of the training epoch that has finished.
@@ -483,16 +494,15 @@ class TrainerModule:
                 iterator : Iterator,
                 **kwargs) -> Iterator:
         """
-        Wraps an iterator in a progress bar tracker (tqdm) if the progress bar
-        is enabled.
+        Wraps an iterator in a progress bar tracker (tqdm) if the progress bar is enabled.
 
         Args:
           iterator: Iterator to wrap in tqdm.
           kwargs: Additional arguments to tqdm.
 
         Returns:
-          Wrapped iterator if progress bar is enabled, otherwise same iterator
-          as input.
+          Wrapped iterator if progress bar is enabled, 
+          otherwise same iterator as input.
         """
         if self.enable_progress_bar:
             return tqdm(iterator, **kwargs)
@@ -511,8 +521,10 @@ class TrainerModule:
           step: Index of the step to save the model at, e.g. epoch.
         """
         checkpoints.save_checkpoint(ckpt_dir=self.log_dir,
-                                    target={'params': self.state.params,
-                                            'batch_stats': self.state.batch_stats},
+                                    target={
+                                        'params': self.state.params,
+                                        'batch_stats': self.state.batch_stats
+                                        },
                                     step=step,
                                     overwrite=True)
         
@@ -531,8 +543,7 @@ class TrainerModule:
         
     def bind_model(self):
         """
-        Returns a model with parameters bound to it. Enables an easier inference
-        access.
+        Returns a model with parameters bound to it. Enables an easier inference access.
 
         Returns:
           The model with parameters and evt. batch statistics bound to it.
@@ -547,8 +558,8 @@ class TrainerModule:
                              checkpoint : str,
                              exmp_input : Any) -> Any:
         """
-        Creates a Trainer object with same hyperparameters and loaded model from
-        a checkpoint directory.
+        A factory function to creates a Trainer object with same hyperparameters 
+        and loaded model from a checkpoint directory.
 
         Args:
           checkpoint: Folder in which the checkpoint and hyperparameter file is stored.
