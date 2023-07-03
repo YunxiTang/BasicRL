@@ -41,16 +41,17 @@ class RegModel(nn.Module):
     @nn.compact
     def __call__(self, x, train: bool):
         x = jnp.concatenate(
-                [jnp.sin(x), jnp.sin(5*x), jnp.cos(x), jnp.cos(5*x), x], axis=1
+                [jnp.sin(x), jnp.sin(2*x), jnp.cos(x), jnp.cos(2*x), x], axis=1
             )
         for dims in self.hidden_dims:
             x = nn.Dense(dims, 
                          kernel_init=nn.initializers.kaiming_normal(), 
                          bias_init=nn.initializers.zeros_init())(x)
+            z = x
+            x = nn.BatchNorm()(x, use_running_average=not train)
             x = nn.silu(x)
             x = nn.Dropout(self.drop_rate)(x, deterministic=not train)
-            x = nn.BatchNorm()(x, use_running_average=not train)
-            
+            x = nn.silu(x + z)
         x = nn.Dense(self.output_dim)(x)
         return x
     
@@ -118,7 +119,8 @@ if __name__ == '__main__':
         logger_params={'base_log_dir': CHECKPOINT_PATH},
         exmp_input=next(iter(train_loader))[0:1],
         check_val_every_n_epoch=5,
-        debug=False
+        debug=False,
+        seed=15
     )
     metrics, optimized_state = trainer.train_model(
         train_loader,
